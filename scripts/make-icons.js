@@ -9,8 +9,13 @@ const GLYPH = 'M22.08,42.76,64,63.69l-7,3.49H43l-7-3.49v-7l-14,7v7l14,7H64l14-7v
 const DISC = 'M100,50A50,50,0,1,1,50,0,50,50,0,0,1,100,50Z'
 const page = (size, body) => `data:text/html,${encodeURIComponent(`<html><body style="margin:0;background:transparent"><svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${body}</svg></body></html>`)}`
 const jobs = [
-  // Apple's icon grid: 824 px body inside 1024, corner radius ≈ 185.
-  ['app-icon.png', 1024, `<rect x="100" y="100" width="824" height="824" rx="185" fill="#0d1311"/><g transform="translate(232,232) scale(5.6)"><path fill="#f3eee5" d="${GLYPH}"/></g>`],
+  // Apple's icon grid: 824 px body inside 1024, corner radius ≈ 185. The chosen design: the mark's dark
+  // disc on a light body, with a copper dot that reads as "online".
+  ['app-icon.png', 1024, `<defs><filter id="sh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity=".28"/></filter><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e8e5dd"/></linearGradient></defs>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#g)" filter="url(#sh)"/>
+    <rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#13171c" stroke-opacity=".08" stroke-width="2"/>
+    <circle cx="512" cy="512" r="292" fill="#13171c"/><path transform="translate(${512 - 50 * (326 / 56)},${512 - 49.69 * (326 / 56)}) scale(${326 / 56})" fill="#f6f5f1" d="${GLYPH}"/>
+    <circle cx="722" cy="722" r="84" fill="#f1eee7"/><circle cx="722" cy="722" r="58" fill="#dd7d3d"/>`],
   // Template image: alpha only. Disc with the mark cut out, 2 px breathing room.
   ['tray-template.png', 44, `<g transform="translate(3,3) scale(0.38)"><path fill="#000" fill-rule="nonzero" d="${DISC}${GLYPH}"/></g>`],
 ]
