@@ -406,9 +406,18 @@ impl Worker {
                 Ok(Cmd::StopAndQuit) => {
                     self.busy = Some(Phase::Stopping);
                     self.publish(Phase::Stopping, None, Http::Down);
-                    let _ = self.stop();
-                    self.app.exit(0);
-                    return;
+                    match self.stop() {
+                        Ok(()) => { self.app.exit(0); return; }
+                        Err(error) => {
+                            // Do not report a successful stop by disappearing while
+                            // launchd may still be running the service.
+                            self.error = Some(error.clone());
+                            self.busy = None;
+                            show_main(&self.app);
+                            self.app.dialog().message(error).title(text(self.shared.status.lock().unwrap().lang).s_failed)
+                                .kind(MessageDialogKind::Error).show(|_| {});
+                        }
+                    }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,

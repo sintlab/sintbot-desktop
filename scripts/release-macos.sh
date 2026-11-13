@@ -25,6 +25,7 @@ if [ -z "${APPLE_API_KEY:-}" ]; then
   : "${APPLE_PASSWORD:?}" "${APPLE_TEAM_ID:?}"
   notary=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
 else
+  : "${APPLE_API_KEY_PATH:?Set APPLE_API_KEY_PATH}" "${APPLE_API_ISSUER:?Set APPLE_API_ISSUER}"
   notary=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
 fi
 [ -z "$(git status --porcelain 2>/dev/null)" ] || echo "Note: the working tree has uncommitted changes" >&2
@@ -42,12 +43,24 @@ fi
 # The Tauri CLI signs the app with the hardened runtime, notarizes and staples it
 # when the variables above are present, then builds the disk image from it.
 npx tauri build --bundles app,dmg
-app=src-tauri/target/release/bundle/macos/SintBot.app
-dmg="$(ls src-tauri/target/release/bundle/dmg/*.dmg)"
+dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+[ "${#dmgs[@]}" = 1 ] && [ -f "${dmgs[0]}" ] ||
+  { echo "Expected exactly one DMG in the bundle directory" >&2; exit 1; }
+dmg="${dmgs[0]}"
 codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg"
 xcrun notarytool submit "$dmg" "${notary[@]}" --wait
 xcrun stapler staple "$dmg"
 
+# The DMG bundler may clean the intermediate .app. Verify the actual shipped
+# copy, mounted read-only, rather than relying on that intermediate directory.
+mount_dir="$(mktemp -d "${TMPDIR:-/tmp}/sintbot-release.XXXXXX")"
+cleanup() {
+  hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+  rmdir "$mount_dir" 2>/dev/null || true
+}
+trap cleanup EXIT
+hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
+app="$mount_dir/SintBot.app"
 codesign --verify --deep --strict --verbose=2 "$app"
 spctl -a -t exec -vv "$app"
 spctl -a -t open --context context:primary-signature -vv "$dmg"

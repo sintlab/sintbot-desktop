@@ -100,7 +100,8 @@ pub fn build_plist(spec: &JobSpec) -> Dictionary {
     dict.insert("KeepAlive".into(), Value::Boolean(true));
     dict.insert("StandardOutPath".into(), Value::String(log.clone()));
     dict.insert("StandardErrorPath".into(), Value::String(log));
-    // Lists the job under this app's name in System Settings › Login Items.
+    // Declare the owning app; macOS may still group this legacy agent under
+    // the Node.js signing identity in System Settings › Login Items.
     dict.insert("AssociatedBundleIdentifiers".into(), Value::Array(vec![Value::String(spec.bundle_id.into())]));
     dict
 }

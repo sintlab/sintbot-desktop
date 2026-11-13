@@ -70,17 +70,18 @@ On the Mac with the Developer ID certificate:
 
 ```bash
 export APPLE_SIGNING_IDENTITY="Developer ID Application: … (TEAMID)"
-export APPLE_ID=… APPLE_PASSWORD=… APPLE_TEAM_ID=…
+export APPLE_API_KEY="<key ID>" APPLE_API_ISSUER="<issuer ID>"
+export APPLE_API_KEY_PATH="/secure/path/AuthKey_<key ID>.p8"
 scripts/release-macos.sh 1.4.18
 ```
 
-The script stages the published service version, builds, signs with the hardened runtime, notarizes and staples the app and the disk image, then runs the Gatekeeper checks and prints the image's SHA-256.
+The script stages the published service version, builds, signs with the hardened runtime, notarizes and staples the app and the disk image, then validates the App inside the read-only mounted image, runs Gatekeeper checks and prints the image's SHA-256. Keep the API private key outside the repository. Apple ID app-specific password credentials remain an alternative supported by the script.
 
-Not yet verified on a signing Mac:
+Signing validation and remaining checks:
 
-- **The bundled Node.js binary.** The build leaves it with the Node.js project's own Developer ID signature and entitlements (confirmed locally: the bundler signs only the app's executable, and `codesign --verify --deep --strict` passes). That signature requests `get-task-allow`. If notarization rejects it, rerun with `SINTBOT_RESIGN_NODE=1`, which signs the binary with your identity and `release/node-entitlements.plist`.
+- **The bundled Node.js binary.** The Apple silicon v0.1.0 candidate passed App and DMG notarization and Gatekeeper with Node.js 22.23.5 retaining its original signature. Recheck on each runtime change; `SINTBOT_RESIGN_NODE=1` remains an explicit fallback if Apple rejects a future binary.
 - **A quarantined first launch** (downloaded image, app in Applications) on a Mac that has never had SintBot.
-- **Login Items.** The job declares the app's bundle identifier so System Settings lists it as SintBot.
+- **Login Items.** On the signing Mac, System Settings groups the development job under **Node.js Foundation**, even with the app bundle identifier declared. The displayed name on a clean installation remains to be checked.
 
 ## Limits of this version
 
