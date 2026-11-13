@@ -1,0 +1,616 @@
+// SintBot for macOS. The app is a thin shell: it installs a Node.js runtime and
+// the service package, keeps the service running as a launchd job, and shows
+// the service's own web console in a window. Everything the user configures
+// lives in that console, which is the same page a browser gets.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod health;
+mod layout;
+mod provision;
+mod service;
+mod shellenv;
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+use health::Http;
+use layout::Layout;
+use service::Job;
+
+const BUNDLE_ID: &str = "com.sintbot.desktop";
+const TICK: Duration = Duration::from_secs(2);
+
+/// Runs in every page of the window, including the console served by the local
+/// service. Links that leave the console open in the default browser; the
+/// navigation handler below does the opening.
+const INIT_JS: &str = r#"(() => {
+  if (window.__SINTBOT_DESKTOP__) return;
+  window.__SINTBOT_DESKTOP__ = true;
+  const external = url => { location.href = 'sintbot-open:' + encodeURIComponent(url) };
+  document.addEventListener('click', event => {
+    const link = event.target && event.target.closest && event.target.closest('a[href]');
+    if (!link || event.defaultPrevented) return;
+    let url; try { url = new URL(link.getAttribute('href'), location.href) } catch { return }
+    if (!/^https?:$/.test(url.protocol)) return;
+    if (link.target === '_blank' || url.origin !== location.origin) { event.preventDefault(); external(url.href) }
+  }, true);
+  const open = window.open;
+  window.open = function (url) {
+    if (!url) return open.apply(window, arguments);
+    try { external(new URL(url, location.href).href) } catch {}
+    return null;
+  };
+})();"#;
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Phase { Preparing, Starting, Setup, Running, Stopping, Stopped, Failed }
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Status {
+    phase: Phase,
+    /// Why the last start did not happen. Cleared by the next attempt.
+    error: Option<String>,
+    app_version: String,
+    node_version: Option<String>,
+    service_version: Option<String>,
+    codex: Option<String>,
+    claude: Option<String>,
+    label: String,
+    pid: Option<u32>,
+    http: Http,
+    url: String,
+    adopted: bool,
+    development: bool,
+    log_file: String,
+    log_tail: Vec<String>,
+    lang: &'static str,
+}
+
+enum Cmd { Ensure, Stop, Restart, StopAndQuit }
+
+struct Shared {
+    status: Mutex<Status>,
+    tx: Mutex<Sender<Cmd>>,
+    launcher: Mutex<Option<Url>>,
+    tray: Mutex<Option<TrayItems>>,
+}
+
+struct TrayItems {
+    status: MenuItem<tauri::Wry>,
+    start: MenuItem<tauri::Wry>,
+    stop: MenuItem<tauri::Wry>,
+    restart: MenuItem<tauri::Wry>,
+}
+
+struct Text {
+    open: &'static str, browser: &'static str, start: &'static str, stop: &'static str, restart: &'static str,
+    logs: &'static str, quit: &'static str, stop_quit: &'static str,
+    stop_title: &'static str, stop_body: &'static str, restart_body: &'static str, confirm_stop: &'static str,
+    confirm_restart: &'static str, cancel: &'static str,
+    s_preparing: &'static str, s_starting: &'static str, s_setup: &'static str, s_running: &'static str,
+    s_stopping: &'static str, s_stopped: &'static str, s_failed: &'static str,
+}
+
+const ZH: Text = Text {
+    open: "打开控制台", browser: "在浏览器中打开", start: "启动机器人", stop: "停止机器人", restart: "重启机器人",
+    logs: "查看日志", quit: "退出（机器人继续在后台运行）", stop_quit: "停止机器人并退出",
+    stop_title: "停止 SintBot？", stop_body: "正在进行的任务会被中断，群里的消息在重新启动前不会有回应。",
+    restart_body: "正在进行的任务会被中断，随后服务重新启动。", confirm_stop: "停止", confirm_restart: "重启", cancel: "取消",
+    s_preparing: "正在准备…", s_starting: "正在启动…", s_setup: "等待接入聊天平台", s_running: "运行中",
+    s_stopping: "正在停止…", s_stopped: "已停止", s_failed: "未能启动",
+};
+const EN: Text = Text {
+    open: "Open Console", browser: "Open in Browser", start: "Start SintBot", stop: "Stop SintBot", restart: "Restart SintBot",
+    logs: "Show Log", quit: "Quit (SintBot keeps running)", stop_quit: "Stop SintBot and Quit",
+    stop_title: "Stop SintBot?", stop_body: "Running tasks are interrupted, and groups get no reply until it starts again.",
+    restart_body: "Running tasks are interrupted, then the service starts again.", confirm_stop: "Stop", confirm_restart: "Restart", cancel: "Cancel",
+    s_preparing: "Preparing…", s_starting: "Starting…", s_setup: "Waiting for chat setup", s_running: "Running",
+    s_stopping: "Stopping…", s_stopped: "Stopped", s_failed: "Could not start",
+};
+
+fn system_lang() -> &'static str {
+    let out = Command::new("/usr/bin/defaults").args(["read", "-g", "AppleLanguages"]).stdin(Stdio::null()).output();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let first = text.split('"').nth(1).unwrap_or("");
+    if first.starts_with("zh") { "zh" } else { "en" }
+}
+
+fn text(lang: &str) -> &'static Text { if lang == "zh" { &ZH } else { &EN } }
+
+fn phase_label(t: &Text, phase: Phase) -> &'static str {
+    match phase {
+        Phase::Preparing => t.s_preparing, Phase::Starting => t.s_starting, Phase::Setup => t.s_setup,
+        Phase::Running => t.s_running, Phase::Stopping => t.s_stopping, Phase::Stopped => t.s_stopped,
+        Phase::Failed => t.s_failed,
+    }
+}
+
+fn tail(file: &Path, lines: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut handle) = std::fs::File::open(file) else { return Vec::new() };
+    let size = handle.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = handle.seek(SeekFrom::Start(size.saturating_sub(8 * 1024)));
+    let mut bytes = Vec::new();
+    let _ = handle.read_to_end(&mut bytes);
+    let text = String::from_utf8_lossy(&bytes);
+    let all: Vec<&str> = text.lines().filter(|line| !line.trim().is_empty()).collect();
+    all[all.len().saturating_sub(lines)..].iter().map(|line| line.chars().take(400).collect()).collect()
+}
+
+fn show_main(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn hide_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    // Menu-bar only while the window is closed: no Dock icon for a background helper.
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+}
+
+fn open_with_system(target: &str) {
+    let _ = Command::new("/usr/bin/open").arg(target).stdin(Stdio::null()).spawn();
+}
+
+fn is_loopback(url: &Url) -> bool {
+    url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+}
+
+/// The window only ever shows the bundled status page or the local console.
+fn allow_navigation(url: &Url) -> bool {
+    match url.scheme() {
+        "tauri" | "about" | "blob" | "data" => true,
+        "http" if is_loopback(url) => true,
+        "sintbot-open" => {
+            let encoded = url.as_str().trim_start_matches("sintbot-open:");
+            let target: String = percent_decode(encoded);
+            if Url::parse(&target).is_ok_and(|u| matches!(u.scheme(), "http" | "https")) { open_with_system(&target) }
+            false
+        }
+        "http" | "https" | "mailto" => { open_with_system(url.as_str()); false }
+        _ => false,
+    }
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(&input[i + 1..i + 3], 16) { out.push(value); i += 3; continue }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+struct Worker {
+    app: AppHandle,
+    shared: Arc<Shared>,
+    layout: Layout,
+    resources: PathBuf,
+    job: Option<Job>,
+    busy: Option<Phase>,
+    error: Option<String>,
+    down_since: Option<Instant>,
+    tools: (Option<String>, Option<String>),
+    versions: (Option<String>, Option<String>),
+}
+
+impl Worker {
+    fn publish(&self, phase: Phase, pid: Option<u32>, http: Http) {
+        let port = self.job.as_ref().map(|j| j.port).unwrap_or(self.layout.port);
+        let log_file = self.job.as_ref().and_then(|j| j.log_file.clone()).unwrap_or_else(|| self.layout.log_file());
+        let snapshot = {
+            let mut status = self.shared.status.lock().unwrap();
+            status.phase = phase;
+            status.error = self.error.clone();
+            status.pid = pid;
+            status.http = http;
+            status.url = format!("http://127.0.0.1:{port}/");
+            status.label = self.job.as_ref().map(|j| j.label.clone()).unwrap_or_else(|| self.layout.label.clone());
+            status.adopted = self.job.as_ref().is_some_and(|j| !j.managed);
+            status.node_version = self.versions.0.clone();
+            status.service_version = self.job.as_ref().and_then(|j| provision::entry_version(&j.entry)).or(self.versions.1.clone());
+            status.codex = self.tools.0.clone();
+            status.claude = self.tools.1.clone();
+            status.log_tail = if matches!(phase, Phase::Running | Phase::Setup) { Vec::new() } else { tail(&log_file, 14) };
+            status.log_file = log_file.to_string_lossy().to_string();
+            status.clone()
+        };
+        self.update_tray(&snapshot);
+        self.write_status_file(&snapshot);
+    }
+
+    /// The same snapshot the status page shows, for scripts and bug reports.
+    /// Only when the install root already exists: reporting must not be the
+    /// thing that creates it.
+    fn write_status_file(&self, status: &Status) {
+        if !self.layout.root.is_dir() { return }
+        let Ok(json) = serde_json::to_string_pretty(status) else { return };
+        let file = self.layout.root.join("desktop-status.json");
+        if std::fs::read_to_string(&file).is_ok_and(|current| current == json) { return }
+        let tmp = self.layout.root.join(format!(".desktop-status.{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, json).is_ok() { let _ = std::fs::rename(&tmp, &file); }
+    }
+
+    fn update_tray(&self, status: &Status) {
+        let t = text(status.lang);
+        let mut line = phase_label(t, status.phase).to_string();
+        if let (Phase::Running | Phase::Setup, Some(version)) = (status.phase, &status.service_version) {
+            line = format!("{line} · v{version}");
+        }
+        let (can_start, can_stop) = match status.phase {
+            Phase::Stopped | Phase::Failed => (true, status.pid.is_some()),
+            Phase::Running | Phase::Setup | Phase::Starting => (false, true),
+            Phase::Preparing | Phase::Stopping => (false, false),
+        };
+        if let Some(items) = self.shared.tray.lock().unwrap().as_ref() {
+            let _ = items.status.set_text(line);
+            let _ = items.start.set_enabled(can_start);
+            let _ = items.stop.set_enabled(can_stop);
+            let _ = items.restart.set_enabled(can_stop);
+        }
+    }
+
+    /// Console when the service answers, status page when it has been away for
+    /// a while. A console upgrade restarts the service and the console page
+    /// follows that itself, so a short gap must not pull it away.
+    fn steer(&mut self, status_http: Http, loaded: bool, url: &str) {
+        let Some(window) = self.app.get_webview_window("main") else { return };
+        let Ok(current) = window.url() else { return };
+        let on_console = is_loopback(&current);
+        if status_http != Http::Down {
+            self.down_since = None;
+            if !on_console { if let Ok(target) = Url::parse(url) { let _ = window.navigate(target); } }
+            return;
+        }
+        if !on_console { self.down_since = None; return }
+        let since = *self.down_since.get_or_insert_with(Instant::now);
+        let patience = if loaded { Duration::from_secs(150) } else { Duration::from_secs(20) };
+        if since.elapsed() >= patience {
+            if let Some(launcher) = self.shared.launcher.lock().unwrap().clone() { let _ = window.navigate(launcher); }
+            self.down_since = None;
+        }
+    }
+
+    fn refresh(&mut self) {
+        if self.busy.is_none() { self.job = service::find_existing(&self.layout).or(self.job.take()); }
+        let loaded = self.job.as_ref().and_then(|job| service::loaded(&job.label));
+        let pid = loaded.and_then(|l| l.pid);
+        let port = self.job.as_ref().map(|j| j.port).unwrap_or(self.layout.port);
+        let http = if pid.is_some() { health::probe(port) } else { Http::Down };
+        let phase = match (self.busy, http, loaded.is_some()) {
+            (Some(Phase::Stopping), _, true) => Phase::Stopping,
+            (Some(Phase::Preparing), _, _) => Phase::Preparing,
+            (_, Http::Console, _) => Phase::Running,
+            (_, Http::Setup, _) => Phase::Setup,
+            (_, Http::Down, true) => Phase::Starting,
+            (_, Http::Down, false) => if self.error.is_some() { Phase::Failed } else { Phase::Stopped },
+        };
+        if matches!(phase, Phase::Running | Phase::Setup) { self.error = None; }
+        self.publish(phase, pid, http);
+        let url = format!("http://127.0.0.1:{port}/");
+        self.steer(http, loaded.is_some(), &url);
+    }
+
+    fn say(&self, zh: String, en: String) -> String {
+        if self.shared.status.lock().unwrap().lang == "zh" { zh } else { en }
+    }
+
+    fn start(&mut self) -> Result<(), String> {
+        let layout = self.layout.clone();
+        let existing = service::find_existing(&layout);
+        if let Some(job) = existing.as_ref().filter(|job| !job.managed) {
+            // Someone else's job: start it as it is, never rewrite it.
+            self.job = Some(job.clone());
+            if service::loaded(&job.label).is_none() { service::bootstrap(&job.plist)?; }
+            return Ok(());
+        }
+        let seed = provision::Seed::read(&self.resources)?;
+        self.versions = (Some(seed.node_version.clone()), Some(seed.service_version.clone()));
+        let dirs = shellenv::login_dirs(&layout.home);
+        let mut search = dirs.clone();
+        search.push(layout.tools_bin());
+        self.tools = (shellenv::find_tool(&search, "codex").map(|p| p.to_string_lossy().to_string()),
+            shellenv::find_tool(&search, "claude").map(|p| p.to_string_lossy().to_string()));
+        if let Some(job) = existing.as_ref() {
+            self.job = Some(job.clone());
+            // A loaded job is left exactly as it runs; opening the app must
+            // never restart a working service.
+            if service::loaded(&job.label).is_some() { return Ok(()) }
+        } else if layout.plist_path().exists() {
+            let file = layout.plist_path().display().to_string();
+            return Err(self.say(format!("{file} 已存在，但它启动的不是 SintBot；请先把它移走。"),
+                format!("{file} exists but does not start SintBot; move it aside first.")));
+        }
+        // Checked before anything is installed: on a Mac where SintBot (or
+        // something else on its port) already runs, the app changes nothing.
+        if let Some(pid) = service::lock_holder(&layout.state_dir()) {
+            return Err(self.say(format!("SintBot 已经在这个 App 之外运行（进程 {pid}）。先在它所在的终端按 Ctrl-C 停掉，再点启动。"),
+                format!("SintBot is already running outside this app (process {pid}). Stop it there first (Ctrl-C in its terminal), then start again.")));
+        }
+        if health::port_in_use(layout.port) {
+            let port = layout.port;
+            return Err(self.say(format!("端口 {port} 正被其他程序占用。退出那个程序后再点启动。"),
+                format!("Port {port} is in use by another program. Quit that program, then start again.")));
+        }
+        let runtime = provision::ensure_runtime(&layout, &seed)?;
+        let seeded = provision::ensure_release(&layout, &seed, &runtime)?;
+        // Keep a version the service upgraded itself to; never downgrade it.
+        let entry = existing.as_ref().map(|job| job.entry.clone())
+            .filter(|entry| entry.is_file() && entry.starts_with(layout.releases_dir()))
+            .filter(|entry| provision::entry_version(entry).is_some_and(|v| provision::is_newer(&v, &seed.service_version)))
+            .unwrap_or(seeded);
+        let path_env = shellenv::service_path(&dirs, &[layout.tools_bin(), runtime.dir.join("bin")]);
+        if let Some(parent) = layout.log_file().parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        let dict = service::build_plist(&service::JobSpec { layout: &layout, node: &runtime.node, entry: &entry,
+            path_env: &path_env, bundle_id: BUNDLE_ID });
+        service::write_plist(&layout.plist_path(), &dict)?;
+        self.job = service::read_job(&layout.plist_path());
+        service::bootstrap(&layout.plist_path())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        match self.job.clone() {
+            Some(job) => service::bootout(&job.label, Duration::from_secs(90)),
+            None => Ok(()),
+        }
+    }
+
+    fn run(mut self, rx: mpsc::Receiver<Cmd>) {
+        loop {
+            match rx.recv_timeout(TICK) {
+                Ok(Cmd::Ensure) => {
+                    self.error = None;
+                    self.busy = Some(Phase::Preparing);
+                    self.publish(Phase::Preparing, None, Http::Down);
+                    if let Err(error) = self.start() { self.error = Some(error); }
+                    self.busy = None;
+                }
+                Ok(Cmd::Stop) => {
+                    self.busy = Some(Phase::Stopping);
+                    self.publish(Phase::Stopping, None, Http::Down);
+                    self.error = self.stop().err();
+                    self.busy = None;
+                }
+                Ok(Cmd::Restart) => {
+                    self.busy = Some(Phase::Stopping);
+                    self.publish(Phase::Stopping, None, Http::Down);
+                    self.error = self.stop().err();
+                    if self.error.is_none() {
+                        self.busy = Some(Phase::Preparing);
+                        if let Err(error) = self.start() { self.error = Some(error); }
+                    }
+                    self.busy = None;
+                }
+                Ok(Cmd::StopAndQuit) => {
+                    self.busy = Some(Phase::Stopping);
+                    self.publish(Phase::Stopping, None, Http::Down);
+                    let _ = self.stop();
+                    self.app.exit(0);
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+            self.refresh();
+        }
+    }
+}
+
+fn send(app: &AppHandle, cmd: Cmd) {
+    let shared = app.state::<Arc<Shared>>();
+    let _ = shared.tx.lock().unwrap().send(cmd);
+}
+
+fn confirm_then(app: &AppHandle, body: &'static str, ok: &'static str, cmd: fn() -> Cmd) {
+    let lang = app.state::<Arc<Shared>>().status.lock().unwrap().lang;
+    let t = text(lang);
+    let handle = app.clone();
+    app.dialog().message(body).title(t.stop_title).kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(ok.to_string(), t.cancel.to_string()))
+        .show(move |confirmed| if confirmed { send(&handle, cmd()) });
+}
+
+/// Opening the app again shows the window. With a flag it drives the running
+/// app instead (`SintBot --stop`), which is how scripts and tests control it.
+fn second_launch(app: &AppHandle, args: &[String]) {
+    match args.iter().skip(1).find(|arg| arg.starts_with("--")).map(String::as_str) {
+        Some("--start") => send(app, Cmd::Ensure),
+        Some("--stop") => send(app, Cmd::Stop),
+        Some("--restart") => send(app, Cmd::Restart),
+        Some("--quit") => app.exit(0),
+        _ => show_main(app),
+    }
+}
+
+#[tauri::command]
+fn status(shared: tauri::State<Arc<Shared>>) -> Status { shared.status.lock().unwrap().clone() }
+
+#[tauri::command]
+fn service_action(app: AppHandle, action: String) -> Result<(), String> {
+    let lang = app.state::<Arc<Shared>>().status.lock().unwrap().lang;
+    let t = text(lang);
+    match action.as_str() {
+        "start" => send(&app, Cmd::Ensure),
+        "stop" => confirm_then(&app, t.stop_body, t.confirm_stop, || Cmd::Stop),
+        "restart" => confirm_then(&app, t.restart_body, t.confirm_restart, || Cmd::Restart),
+        _ => return Err("unknown action".into()),
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_logs(shared: tauri::State<Arc<Shared>>) {
+    let file = shared.status.lock().unwrap().log_file.clone();
+    if Path::new(&file).is_file() { open_with_system(&file) }
+}
+
+fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
+    let t = text(lang);
+    let item = |id: &str, label: &str, enabled: bool| MenuItem::with_id(app, id, label, enabled, None::<&str>);
+    let status = item("status", t.s_preparing, false)?;
+    let open = item("open", t.open, true)?;
+    let browser = item("browser", t.browser, true)?;
+    let start = item("start", t.start, false)?;
+    let stop = item("stop", t.stop, false)?;
+    let restart = item("restart", t.restart, false)?;
+    let logs = item("logs", t.logs, true)?;
+    let quit = item("quit", t.quit, true)?;
+    let stop_quit = item("stop_quit", t.stop_quit, true)?;
+    let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &browser,
+        &PredefinedMenuItem::separator(app)?, &start, &stop, &restart, &logs,
+        &PredefinedMenuItem::separator(app)?, &quit, &stop_quit])?;
+    TrayIconBuilder::with_id("main")
+        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?)
+        .icon_as_template(true)
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(move |app, event| {
+            let t = text(lang);
+            match event.id().as_ref() {
+                "open" => show_main(app),
+                "browser" => {
+                    let url = app.state::<Arc<Shared>>().status.lock().unwrap().url.clone();
+                    open_with_system(&url);
+                }
+                "start" => send(app, Cmd::Ensure),
+                "stop" => confirm_then(app, t.stop_body, t.confirm_stop, || Cmd::Stop),
+                "restart" => confirm_then(app, t.restart_body, t.confirm_restart, || Cmd::Restart),
+                "logs" => {
+                    let file = app.state::<Arc<Shared>>().status.lock().unwrap().log_file.clone();
+                    if Path::new(&file).is_file() { open_with_system(&file) }
+                }
+                "quit" => app.exit(0),
+                "stop_quit" => confirm_then(app, t.stop_body, t.confirm_stop, || Cmd::StopAndQuit),
+                _ => {}
+            }
+        })
+        .build(app)?;
+    Ok(TrayItems { status, start, stop, restart })
+}
+
+fn main() {
+    let layout = match Layout::from_env() {
+        Ok(layout) => layout,
+        Err(error) => { eprintln!("SintBot: {error}"); std::process::exit(2) }
+    };
+    let lang = system_lang();
+    let (tx, rx) = mpsc::channel();
+    let shared = Arc::new(Shared {
+        status: Mutex::new(Status {
+            phase: Phase::Preparing, error: None, app_version: env!("CARGO_PKG_VERSION").to_string(),
+            node_version: None, service_version: None, codex: None, claude: None, label: layout.label.clone(),
+            pid: None, http: Http::Down, url: layout.console_url(), adopted: false, development: layout.overridden,
+            log_file: layout.log_file().to_string_lossy().to_string(), log_tail: Vec::new(), lang,
+        }),
+        tx: Mutex::new(tx), launcher: Mutex::new(None), tray: Mutex::new(None),
+    });
+    let worker_shared = shared.clone();
+    let mut rx = Some(rx);
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| second_launch(app, &args)))
+        .plugin(tauri_plugin_dialog::init())
+        .manage(shared)
+        .invoke_handler(tauri::generate_handler![status, service_action, open_logs])
+        .setup(move |app| {
+            // Reaching setup means no other instance took the launch over. A
+            // control flag then has nothing to drive: do what it asks without
+            // opening the app.
+            match std::env::args().skip(1).find(|arg| arg.starts_with("--")).as_deref() {
+                Some("--quit") => std::process::exit(0),
+                Some("--stop") => {
+                    let stopped = match service::find_existing(&layout) {
+                        Some(job) => service::bootout(&job.label, Duration::from_secs(90)),
+                        None => Ok(()),
+                    };
+                    if let Err(error) = &stopped { eprintln!("SintBot: {error}"); }
+                    std::process::exit(if stopped.is_ok() { 0 } else { 1 });
+                }
+                _ => {}
+            }
+            let handle = app.handle().clone();
+            let items = build_tray(&handle, lang)?;
+            *worker_shared.tray.lock().unwrap() = Some(items);
+            // Development aid: show a console served by something else (a preview
+            // server with sample data) in the real window, and manage no service.
+            let preview = std::env::var("SINTBOT_DESKTOP_PREVIEW_URL").ok()
+                .and_then(|value| Url::parse(&value).ok()).filter(is_loopback);
+            let first_page = match &preview {
+                Some(url) => WebviewUrl::External(url.clone()),
+                None => WebviewUrl::App("index.html".into()),
+            };
+            let window = WebviewWindowBuilder::new(app, "main", first_page)
+                .title("SintBot").inner_size(1080.0, 720.0).min_inner_size(820.0, 560.0)
+                .initialization_script(INIT_JS)
+                .on_navigation(allow_navigation)
+                .build()?;
+            *worker_shared.launcher.lock().unwrap() = window.url().ok();
+            let resources = std::env::var_os("SINTBOT_DESKTOP_RESOURCES").map(PathBuf::from)
+                .map(Ok).unwrap_or_else(|| app.path().resource_dir())?;
+            let worker = Worker { app: handle.clone(), shared: worker_shared.clone(), layout: layout.clone(), resources,
+                job: None, busy: None, error: None, down_since: None, tools: (None, None), versions: (None, None) };
+            let rx = rx.take().expect("setup runs once");
+            if preview.is_none() {
+                std::thread::Builder::new().name("service".into()).spawn(move || worker.run(rx))?;
+                send(&handle, Cmd::Ensure);
+            }
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window leaves the app in the menu bar.
+                api.prevent_close();
+                hide_main(window.app_handle());
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("SintBot could not start")
+        .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => show_main(app),
+            RunEvent::ExitRequested { api, code, .. } => { if code.is_none() { api.prevent_exit() } }
+            _ => {}
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_stays_on_local_pages() {
+        for allowed in ["tauri://localhost/index.html", "http://127.0.0.1:4600/", "http://localhost:4631/x", "about:blank"] {
+            assert!(allow_navigation(&Url::parse(allowed).unwrap()), "{allowed}");
+        }
+        for refused in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com/"] {
+            assert!(!allow_navigation(&Url::parse(refused).unwrap()), "{refused}");
+        }
+    }
+
+    #[test]
+    fn decoding() {
+        assert_eq!(percent_decode("https%3A%2F%2Fsintbot.com%2Fzh%2F"), "https://sintbot.com/zh/");
+        assert_eq!(percent_decode("100%"), "100%");
+    }
+}

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SintBot</title>
+<style>
+/* The only page the app itself draws: shown while the service is being
+   installed, started or is stopped. Everything else in this window is the
+   service's own console. Tokens are the console's light theme, which is the
+   console's default whatever the system appearance, so the hand-over from this
+   page to the setup page or console does not flip colours. */
+:root{
+  --bg:#faf8f4;--card:#fff;--line:#e6ded1;--ink:#1a1714;--dim:#453f38;--muted:#938a7e;
+  --accent:#a16b33;--on-accent:#fff;--ok:#4d7c0f;--fail:#e55934;--inset:rgba(26,23,20,.05);
+  --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB',sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,'PingFang SC',monospace;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:13px/20px var(--sans);-webkit-font-smoothing:antialiased;
+  display:flex;align-items:center;justify-content:center;-webkit-user-select:none;user-select:none;cursor:default}
+main{width:min(460px,calc(100vw - 48px))}
+header{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+header svg{width:28px;height:28px;flex:none}
+h1{font-size:16px;line-height:24px;font-weight:600;margin:0}
+#state{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
+#state i{width:6px;height:6px;border-radius:50%;background:var(--muted)}
+#state.ok i{background:var(--ok)}#state.fail i{background:var(--fail)}
+#state.busy i{animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){#state.busy i{animation:none}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px}
+.row{display:flex;align-items:center;gap:12px;min-height:36px;padding:6px 14px}
+.row+.row{border-top:1px solid var(--line)}
+.row .k{flex:0 0 96px;color:var(--muted);font-size:12px}
+.row .v{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .v.miss{color:var(--muted)}
+.mono{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums}
+#error{margin-top:12px;padding:10px 14px;border-radius:10px;background:var(--inset);color:var(--ink);
+  -webkit-user-select:text;user-select:text;cursor:text}
+#error b{display:block;font-weight:600;color:var(--fail);margin-bottom:2px}
+#log{margin:12px 0 0;padding:10px 14px;max-height:168px;overflow:auto;border-radius:10px;background:var(--inset);
+  color:var(--dim);font:11px/16px var(--mono);white-space:pre-wrap;word-break:break-all;-webkit-user-select:text;user-select:text;cursor:text}
+footer{display:flex;gap:8px;margin-top:16px;align-items:center}
+button{height:32px;padding:0 14px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);
+  font:500 13px/20px var(--sans);cursor:pointer;transition:background-color .15s,border-color .15s}
+button:hover{border-color:var(--muted)}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#note{margin-left:auto;color:var(--muted);font-size:11px}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="50" fill="#fff"/><path fill="#0d1311" d="M100,50A50,50,0,1,1,50,0,50,50,0,0,1,100,50ZM22.08,42.76,64,63.69l-7,3.49H43l-7-3.49v-7l-14,7v7l14,7H64l14-7v-14l-14-7,14-7v-14l-14-7v14l-14,7-14-7v-14l-14,7Z"/></svg>
+    <h1>SintBot</h1>
+    <span id="state" class="busy"><i></i><span id="stateText"></span></span>
+  </header>
+  <section class="card">
+    <div class="row"><span class="k" data-t="service"></span><span class="v mono" id="service"></span></div>
+    <div class="row"><span class="k" data-t="runtime"></span><span class="v mono" id="runtime"></span></div>
+    <div class="row"><span class="k">Codex</span><span class="v mono" id="codex"></span></div>
+    <div class="row"><span class="k">Claude Code</span><span class="v mono" id="claude"></span></div>
+  </section>
+  <div id="error" hidden><b data-t="errorTitle"></b><span id="errorText"></span></div>
+  <pre id="log" hidden></pre>
+  <footer>
+    <button class="primary" id="start" hidden data-t="start"></button>
+    <button id="logs" hidden data-t="logs"></button>
+    <span id="note"></span>
+  </footer>
+</main>
+<script>
+const TEXT = {
+  zh: { service: '服务', runtime: '运行环境', start: '启动', logs: '查看日志', errorTitle: '未能启动',
+    missing: '未找到', bundled: '内置', notInstalled: '尚未安装', noExecutor: '还没有找到 Codex 或 Claude Code；装好并登录其中一个后重启机器人。',
+    development: '开发模式', adopted: '沿用已有的后台服务',
+    phase: { preparing: '正在准备…', starting: '正在启动…', setup: '正在打开接入页…', running: '正在打开控制台…',
+      stopping: '正在停止…', stopped: '已停止', failed: '未能启动' } },
+  en: { service: 'Service', runtime: 'Runtime', start: 'Start', logs: 'Show Log', errorTitle: 'Could not start',
+    missing: 'Not found', bundled: 'built in', notInstalled: 'Not installed yet', noExecutor: 'Neither Codex nor Claude Code was found. Install and sign in to one, then restart SintBot.',
+    development: 'Development mode', adopted: 'Using the existing background service',
+    phase: { preparing: 'Preparing…', starting: 'Starting…', setup: 'Opening setup…', running: 'Opening the console…',
+      stopping: 'Stopping…', stopped: 'Stopped', failed: 'Could not start' } },
+}
+const $ = id => document.getElementById(id)
+const invoke = (command, args) => window.__TAURI_INTERNALS__.invoke(command, args)
+let lang = 'en'
+function paint(s) {
+  if (s.lang !== lang || !$('stateText').textContent) {
+    lang = s.lang; document.documentElement.lang = lang
+    for (const node of document.querySelectorAll('[data-t]')) node.textContent = TEXT[lang][node.dataset.t]
+  }
+  const t = TEXT[lang]
+  $('stateText').textContent = t.phase[s.phase]
+  $('state').className = s.phase === 'failed' ? 'fail' : s.phase === 'stopped' ? '' : ['running', 'setup'].includes(s.phase) ? 'ok' : 'busy'
+  const set = (id, value, fallback) => { const node = $(id); node.textContent = value || fallback; node.classList.toggle('miss', !value); node.title = value || '' }
+  set('service', s.serviceVersion && `v${s.serviceVersion}${s.pid ? ` · PID ${s.pid}` : ''}`, t.notInstalled)
+  set('runtime', s.nodeVersion && `Node.js ${s.nodeVersion} · ${t.bundled}`, s.adopted ? t.adopted : '…')
+  set('codex', s.codex, t.missing); set('claude', s.claude, t.missing)
+  const failed = s.phase === 'failed'
+  $('error').hidden = !s.error; $('errorText').textContent = s.error || ''
+  const showLog = s.logTail.length && (failed || s.phase === 'starting')
+  $('log').hidden = !showLog; if (showLog) { $('log').textContent = s.logTail.join('\n'); $('log').scrollTop = 1e9 }
+  $('start').hidden = !(failed || s.phase === 'stopped')
+  $('logs').hidden = !(failed || s.phase === 'starting' || s.phase === 'stopped')
+  const notes = []
+  if (s.development) notes.push(t.development)
+  if (s.adopted) notes.push(t.adopted)
+  if (s.phase !== 'preparing' && s.nodeVersion && !s.codex && !s.claude) notes.unshift(t.noExecutor)
+  $('note').textContent = notes.join(' · ')
+}
+$('start').onclick = () => invoke('service_action', { action: 'start' })
+$('logs').onclick = () => invoke('open_logs')
+async function poll() { try { paint(await invoke('status')) } catch (error) { console.error(error) } }
+poll(); setInterval(poll, 1000)
+</script>
+</body>
+</html>

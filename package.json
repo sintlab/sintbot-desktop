@@ -1,0 +1,17 @@
+{
+  "name": "sintbot-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SintBot for macOS: a menu-bar app that installs, runs and updates the SintBot service.",
+  "scripts": {
+    "prepare:runtime": "bash scripts/fetch-runtime.sh",
+    "prepare:payload": "bash scripts/stage-payload.sh",
+    "prepare:all": "bash scripts/fetch-runtime.sh && bash scripts/stage-payload.sh",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:local": "tauri build --bundles app --no-sign"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}
