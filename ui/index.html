@@ -3,19 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>SintBot</title>
 <style>
 /* The only page the app itself draws: shown while the service is being
    installed, started or is stopped. Everything else in this window is the
-   service's own console. Tokens are the console's light theme, which is the
-   console's default whatever the system appearance, so the hand-over from this
-   page to the setup page or console does not flip colours. */
+   service's own console. The tokens are the console's two themes; this page
+   follows the system appearance. */
 :root{
-  --bg:#faf8f4;--card:#fff;--line:#e6ded1;--ink:#1a1714;--dim:#453f38;--muted:#938a7e;
-  --accent:#a16b33;--on-accent:#fff;--ok:#4d7c0f;--fail:#e55934;--inset:rgba(26,23,20,.05);
+  color-scheme:light dark;
+  --bg:#f6f5f1;--card:#fff;--line:rgba(22,27,34,.08);--line-hi:rgba(22,27,34,.16);
+  --ink:#252b32;--dim:#59616a;--muted:#737b83;
+  --primary-bg:#252b32;--primary-ink:#fff;--primary-hover:#3a424c;
+  --focus:#a15b30;--ok:#58b17d;--fail:#b44935;--inset:rgba(22,27,34,.03);
+  --mark:#13171c;--mark-ink:#f6f5f1;
   --sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','PingFang SC','Hiragino Sans GB',sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,'PingFang SC',monospace;
 }
+@media(prefers-color-scheme:dark){:root{
+  --bg:#13171c;--card:#20262d;--line:rgba(246,245,241,.09);--line-hi:rgba(246,245,241,.18);
+  --ink:#f6f5f1;--dim:#d1d5d9;--muted:#959fa9;
+  --primary-bg:#f6f5f1;--primary-ink:#252b32;--primary-hover:#f0d9be;
+  --focus:#e7a46b;--ok:#6fd5a6;--fail:#f0776a;--inset:rgba(0,0,0,.13);
+  --mark:#f6f5f1;--mark-ink:#13171c;
+}}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--ink);font:13px/20px var(--sans);-webkit-font-smoothing:antialiased;
@@ -45,9 +56,10 @@ h1{font-size:16px;line-height:24px;font-weight:600;margin:0}
 footer{display:flex;gap:8px;margin-top:16px;align-items:center}
 button{height:32px;padding:0 14px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink);
   font:500 13px/20px var(--sans);cursor:pointer;transition:background-color .15s,border-color .15s}
-button:hover{border-color:var(--muted)}
-button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:hover{border-color:var(--line-hi)}
+button.primary{background:var(--primary-bg);border-color:var(--primary-bg);color:var(--primary-ink);font-weight:600}
+button.primary:hover{background:var(--primary-hover);border-color:var(--primary-hover)}
+button:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 #note{margin-left:auto;color:var(--muted);font-size:11px}
 [hidden]{display:none!important}
 </style>
@@ -55,7 +67,7 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 <body>
 <main>
   <header>
-    <svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="50" fill="#fff"/><path fill="#0d1311" d="M100,50A50,50,0,1,1,50,0,50,50,0,0,1,100,50ZM22.08,42.76,64,63.69l-7,3.49H43l-7-3.49v-7l-14,7v7l14,7H64l14-7v-14l-14-7,14-7v-14l-14-7v14l-14,7-14-7v-14l-14,7Z"/></svg>
+    <svg viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="49" fill="var(--mark-ink)"/><path fill="var(--mark)" d="M100,50A50,50,0,1,1,50,0,50,50,0,0,1,100,50ZM22.08,42.76,64,63.69l-7,3.49H43l-7-3.49v-7l-14,7v7l14,7H64l14-7v-14l-14-7,14-7v-14l-14-7v14l-14,7-14-7v-14l-14,7Z"/></svg>
     <h1>SintBot</h1>
     <span id="state" class="busy"><i></i><span id="stateText"></span></span>
   </header>
