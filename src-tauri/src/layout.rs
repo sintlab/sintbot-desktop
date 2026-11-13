@@ -98,6 +98,10 @@ impl Layout {
     }
     pub fn launch_agents(&self) -> PathBuf { self.home.join("Library/LaunchAgents") }
     pub fn plist_path(&self) -> PathBuf { self.launch_agents().join(format!("{}.plist", self.label)) }
+    /// Where the job file waits while the service is stopped from the app.
+    /// launchd loads everything in LaunchAgents at login, so a job that must
+    /// stay stopped cannot sit there.
+    pub fn parked_plist(&self) -> PathBuf { self.root.join("launchd").join(format!("{}.plist", self.label)) }
     pub fn console_url(&self) -> String { format!("http://127.0.0.1:{}/", self.port) }
 }
 

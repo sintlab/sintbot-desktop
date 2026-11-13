@@ -77,7 +77,11 @@ struct Status {
     lang: &'static str,
 }
 
-enum Cmd { Ensure, Stop, Restart, StopAndQuit }
+enum Cmd {
+    Ensure, Stop, Restart, StopAndQuit,
+    /// `quiet`: driven by a script, so no dialogs.
+    RemoveService { quiet: bool },
+}
 
 struct Shared {
     status: Mutex<Status>,
@@ -95,7 +99,9 @@ struct TrayItems {
 
 struct Text {
     open: &'static str, browser: &'static str, start: &'static str, stop: &'static str, restart: &'static str,
-    logs: &'static str, quit: &'static str, stop_quit: &'static str,
+    logs: &'static str, quit: &'static str, stop_quit: &'static str, remove: &'static str,
+    remove_title: &'static str, remove_body: &'static str, confirm_remove: &'static str,
+    removed_title: &'static str, removed_body: &'static str, remove_adopted: &'static str,
     stop_title: &'static str, stop_body: &'static str, restart_body: &'static str, confirm_stop: &'static str,
     confirm_restart: &'static str, cancel: &'static str,
     s_preparing: &'static str, s_starting: &'static str, s_setup: &'static str, s_running: &'static str,
@@ -104,16 +110,26 @@ struct Text {
 
 const ZH: Text = Text {
     open: "打开控制台", browser: "在浏览器中打开", start: "启动机器人", stop: "停止机器人", restart: "重启机器人",
-    logs: "查看日志", quit: "退出（机器人继续在后台运行）", stop_quit: "停止机器人并退出",
-    stop_title: "停止 SintBot？", stop_body: "正在进行的任务会被中断，群里的消息在重新启动前不会有回应。",
+    logs: "查看日志", quit: "退出（机器人继续在后台运行）", stop_quit: "停止机器人并退出", remove: "移除后台服务…",
+    remove_title: "移除 SintBot 的后台服务？",
+    remove_body: "机器人会停止，登录时也不再启动，然后 App 退出。配置、聊天与任务记录、已安装的版本和运行环境都留在原处，不会删除。再次打开 SintBot 会重新装上后台服务。",
+    confirm_remove: "移除并退出", removed_title: "后台服务已移除",
+    removed_body: "配置、记录、已安装的版本和运行环境都还在。要删除 App，把 SintBot 拖进废纸篓即可。",
+    remove_adopted: "这个后台服务不是由本 App 创建的，App 不会改动或删除它。请按当初安装它的方式移除。",
+    stop_title: "停止 SintBot？", stop_body: "正在进行的任务会被中断。在你重新启动之前，群里的消息不会有回应，下次登录也不会自动启动。",
     restart_body: "正在进行的任务会被中断，随后服务重新启动。", confirm_stop: "停止", confirm_restart: "重启", cancel: "取消",
     s_preparing: "正在准备…", s_starting: "正在启动…", s_setup: "等待接入聊天平台", s_running: "运行中",
     s_stopping: "正在停止…", s_stopped: "已停止", s_failed: "未能启动",
 };
 const EN: Text = Text {
     open: "Open Console", browser: "Open in Browser", start: "Start SintBot", stop: "Stop SintBot", restart: "Restart SintBot",
-    logs: "Show Log", quit: "Quit (SintBot keeps running)", stop_quit: "Stop SintBot and Quit",
-    stop_title: "Stop SintBot?", stop_body: "Running tasks are interrupted, and groups get no reply until it starts again.",
+    logs: "Show Log", quit: "Quit (SintBot keeps running)", stop_quit: "Stop SintBot and Quit", remove: "Remove Background Service…",
+    remove_title: "Remove the SintBot background service?",
+    remove_body: "SintBot stops, no longer starts at login, and the app quits. Settings, chat and task records, installed versions and the runtime stay where they are; nothing is deleted. Opening SintBot again installs the background service again.",
+    confirm_remove: "Remove and Quit", removed_title: "Background service removed",
+    removed_body: "Settings, records, installed versions and the runtime are still there. To delete the app, drag SintBot to the Trash.",
+    remove_adopted: "This background service was not created by this app, so the app will not change or delete it. Remove it the way it was installed.",
+    stop_title: "Stop SintBot?", stop_body: "Running tasks are interrupted. Groups get no reply until you start it again, and it does not start at the next login.",
     restart_body: "Running tasks are interrupted, then the service starts again.", confirm_stop: "Stop", confirm_restart: "Restart", cancel: "Cancel",
     s_preparing: "Preparing…", s_starting: "Starting…", s_setup: "Waiting for chat setup", s_running: "Running",
     s_stopping: "Stopping…", s_stopped: "Stopped", s_failed: "Could not start",
@@ -124,6 +140,13 @@ fn system_lang() -> &'static str {
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     let first = text.split('"').nth(1).unwrap_or("");
     if first.starts_with("zh") { "zh" } else { "en" }
+}
+
+/// The window is painted in the page's background colour before the page
+/// loads, so a dark desktop does not get a white flash.
+fn system_dark() -> bool {
+    Command::new("/usr/bin/defaults").args(["read", "-g", "AppleInterfaceStyle"]).stdin(Stdio::null()).output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Dark")
 }
 
 fn text(lang: &str) -> &'static Text { if lang == "zh" { &ZH } else { &EN } }
@@ -338,7 +361,8 @@ impl Worker {
             // A loaded job is left exactly as it runs; opening the app must
             // never restart a working service.
             if service::loaded(&job.label).is_some() { return Ok(()) }
-        } else if layout.plist_path().exists() {
+        }
+        if layout.plist_path().exists() && service::read_job(&layout.plist_path()).is_none() {
             let file = layout.plist_path().display().to_string();
             return Err(self.say(format!("{file} 已存在，但它启动的不是 SintBot；请先把它移走。"),
                 format!("{file} exists but does not start SintBot; move it aside first.")));
@@ -366,15 +390,31 @@ impl Worker {
         let dict = service::build_plist(&service::JobSpec { layout: &layout, node: &runtime.node, entry: &entry,
             path_env: &path_env, bundle_id: BUNDLE_ID });
         service::write_plist(&layout.plist_path(), &dict)?;
+        service::discard_parked(&layout);
         self.job = service::read_job(&layout.plist_path());
         service::bootstrap(&layout.plist_path())
     }
 
-    fn stop(&mut self) -> Result<(), String> {
-        match self.job.clone() {
-            Some(job) => service::bootout(&job.label, Duration::from_secs(90)),
-            None => Ok(()),
+    /// `hold`: the user asked for the service to be off, so it must also stay
+    /// off at the next login. A restart stops without that.
+    fn stop(&mut self, hold: bool) -> Result<(), String> {
+        let Some(job) = self.job.clone() else { return Ok(()) };
+        if !hold { return service::bootout(&job.label, Duration::from_secs(90)) }
+        if service::stop_job(&self.layout, &job, Duration::from_secs(90))? {
+            self.job = service::find_existing(&self.layout);
         }
+        Ok(())
+    }
+
+    /// Stops the service and deletes the job this app wrote. Nothing else is
+    /// removed. `Ok(false)`: the job belongs to someone else and was not touched.
+    fn remove_service(&mut self) -> Result<bool, String> {
+        let job = service::find_existing(&self.layout).or(self.job.take());
+        if job.as_ref().is_some_and(|job| !job.managed) { return Ok(false) }
+        if let Some(job) = &job { service::bootout(&job.label, Duration::from_secs(90))?; }
+        service::remove_job_files(&self.layout)?;
+        self.job = None;
+        Ok(true)
     }
 
     fn run(mut self, rx: mpsc::Receiver<Cmd>) {
@@ -390,13 +430,13 @@ impl Worker {
                 Ok(Cmd::Stop) => {
                     self.busy = Some(Phase::Stopping);
                     self.publish(Phase::Stopping, None, Http::Down);
-                    self.error = self.stop().err();
+                    self.error = self.stop(true).err();
                     self.busy = None;
                 }
                 Ok(Cmd::Restart) => {
                     self.busy = Some(Phase::Stopping);
                     self.publish(Phase::Stopping, None, Http::Down);
-                    self.error = self.stop().err();
+                    self.error = self.stop(false).err();
                     if self.error.is_none() {
                         self.busy = Some(Phase::Preparing);
                         if let Err(error) = self.start() { self.error = Some(error); }
@@ -406,7 +446,7 @@ impl Worker {
                 Ok(Cmd::StopAndQuit) => {
                     self.busy = Some(Phase::Stopping);
                     self.publish(Phase::Stopping, None, Http::Down);
-                    match self.stop() {
+                    match self.stop(true) {
                         Ok(()) => { self.app.exit(0); return; }
                         Err(error) => {
                             // Do not report a successful stop by disappearing while
@@ -416,6 +456,39 @@ impl Worker {
                             show_main(&self.app);
                             self.app.dialog().message(error).title(text(self.shared.status.lock().unwrap().lang).s_failed)
                                 .kind(MessageDialogKind::Error).show(|_| {});
+                        }
+                    }
+                }
+                Ok(Cmd::RemoveService { quiet }) => {
+                    let t = text(self.shared.status.lock().unwrap().lang);
+                    self.busy = Some(Phase::Stopping);
+                    self.publish(Phase::Stopping, None, Http::Down);
+                    let outcome = self.remove_service();
+                    self.busy = None;
+                    match outcome {
+                        Ok(true) if quiet => { self.app.exit(0); return; }
+                        Ok(true) => {
+                            // The worker ends here: a refresh would be free to
+                            // find nothing, but nothing may start it again.
+                            let app = self.app.clone();
+                            self.publish(Phase::Stopped, None, Http::Down);
+                            self.app.dialog().message(t.removed_body).title(t.removed_title)
+                                .kind(MessageDialogKind::Info).show(move |_| app.exit(0));
+                            return;
+                        }
+                        Ok(false) => {
+                            if quiet { eprintln!("SintBot: {}", EN.remove_adopted); }
+                            else { self.app.dialog().message(t.remove_adopted).title(t.remove_title)
+                                .kind(MessageDialogKind::Info).show(|_| {}); }
+                        }
+                        Err(error) => {
+                            self.error = Some(error.clone());
+                            if quiet { eprintln!("SintBot: {error}"); }
+                            else {
+                                show_main(&self.app);
+                                self.app.dialog().message(error).title(t.remove_title)
+                                    .kind(MessageDialogKind::Error).show(|_| {});
+                            }
                         }
                     }
                 }
@@ -434,9 +507,14 @@ fn send(app: &AppHandle, cmd: Cmd) {
 
 fn confirm_then(app: &AppHandle, body: &'static str, ok: &'static str, cmd: fn() -> Cmd) {
     let lang = app.state::<Arc<Shared>>().status.lock().unwrap().lang;
+    confirm_titled(app, text(lang).stop_title, body, ok, cmd)
+}
+
+fn confirm_titled(app: &AppHandle, title: &'static str, body: &'static str, ok: &'static str, cmd: fn() -> Cmd) {
+    let lang = app.state::<Arc<Shared>>().status.lock().unwrap().lang;
     let t = text(lang);
     let handle = app.clone();
-    app.dialog().message(body).title(t.stop_title).kind(MessageDialogKind::Warning)
+    app.dialog().message(body).title(title).kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(ok.to_string(), t.cancel.to_string()))
         .show(move |confirmed| if confirmed { send(&handle, cmd()) });
 }
@@ -448,6 +526,7 @@ fn second_launch(app: &AppHandle, args: &[String]) {
         Some("--start") => send(app, Cmd::Ensure),
         Some("--stop") => send(app, Cmd::Stop),
         Some("--restart") => send(app, Cmd::Restart),
+        Some("--remove-service") => send(app, Cmd::RemoveService { quiet: true }),
         Some("--quit") => app.exit(0),
         _ => show_main(app),
     }
@@ -485,11 +564,13 @@ fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
     let stop = item("stop", t.stop, false)?;
     let restart = item("restart", t.restart, false)?;
     let logs = item("logs", t.logs, true)?;
+    let remove = item("remove", t.remove, true)?;
     let quit = item("quit", t.quit, true)?;
     let stop_quit = item("stop_quit", t.stop_quit, true)?;
     let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &browser,
         &PredefinedMenuItem::separator(app)?, &start, &stop, &restart, &logs,
-        &PredefinedMenuItem::separator(app)?, &quit, &stop_quit])?;
+        &PredefinedMenuItem::separator(app)?, &quit, &stop_quit,
+        &PredefinedMenuItem::separator(app)?, &remove])?;
     TrayIconBuilder::with_id("main")
         .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?)
         .icon_as_template(true)
@@ -512,6 +593,15 @@ fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
                 }
                 "quit" => app.exit(0),
                 "stop_quit" => confirm_then(app, t.stop_body, t.confirm_stop, || Cmd::StopAndQuit),
+                "remove" => {
+                    // Someone else's job: say so instead of asking to confirm
+                    // something the app will not do.
+                    if app.state::<Arc<Shared>>().status.lock().unwrap().adopted {
+                        app.dialog().message(t.remove_adopted).title(t.remove_title).kind(MessageDialogKind::Info).show(|_| {});
+                    } else {
+                        confirm_titled(app, t.remove_title, t.remove_body, t.confirm_remove, || Cmd::RemoveService { quiet: false });
+                    }
+                }
                 _ => {}
             }
         })
@@ -550,11 +640,21 @@ fn main() {
                 Some("--quit") => std::process::exit(0),
                 Some("--stop") => {
                     let stopped = match service::find_existing(&layout) {
-                        Some(job) => service::bootout(&job.label, Duration::from_secs(90)),
+                        Some(job) => service::stop_job(&layout, &job, Duration::from_secs(90)).map(|_| ()),
                         None => Ok(()),
                     };
                     if let Err(error) = &stopped { eprintln!("SintBot: {error}"); }
                     std::process::exit(if stopped.is_ok() { 0 } else { 1 });
+                }
+                Some("--remove-service") => {
+                    let removed = match service::find_existing(&layout) {
+                        Some(job) if !job.managed => Err(EN.remove_adopted.to_string()),
+                        Some(job) => service::bootout(&job.label, Duration::from_secs(90))
+                            .and_then(|()| service::remove_job_files(&layout)).map(|_| ()),
+                        None => Ok(()),
+                    };
+                    if let Err(error) = &removed { eprintln!("SintBot: {error}"); }
+                    std::process::exit(if removed.is_ok() { 0 } else { 1 });
                 }
                 _ => {}
             }
@@ -569,8 +669,10 @@ fn main() {
                 Some(url) => WebviewUrl::External(url.clone()),
                 None => WebviewUrl::App("index.html".into()),
             };
+            let (r, g, b) = if system_dark() { (0x13, 0x17, 0x1c) } else { (0xf6, 0xf5, 0xf1) };
             let window = WebviewWindowBuilder::new(app, "main", first_page)
                 .title("SintBot").inner_size(1080.0, 720.0).min_inner_size(820.0, 560.0)
+                .background_color(tauri::window::Color(r, g, b, 255))
                 .initialization_script(INIT_JS)
                 .on_navigation(allow_navigation)
                 .build()?;

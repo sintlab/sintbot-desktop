@@ -56,13 +56,54 @@ pub fn read_job(plist: &Path) -> Option<Job> {
 pub fn find_existing(layout: &Layout) -> Option<Job> {
     let own = layout.plist_path();
     if let Some(job) = read_job(&own) { return Some(job) }
-    let mut found: Vec<Job> = fs::read_dir(layout.launch_agents()).ok()?.filter_map(Result::ok)
+    let mut found: Vec<Job> = fs::read_dir(layout.launch_agents()).into_iter().flatten().filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "plist") && *path != own)
         .filter_map(|path| read_job(&path)).collect();
     found.sort_by(|a, b| a.label.cmp(&b.label));
     // Only a job on the same console port can collide with ours.
     found.into_iter().find(|job| job.port == layout.port)
+        // Our own job, set aside by a stop from the app. It remembers which
+        // version the service had upgraded itself to.
+        .or_else(|| read_job(&layout.parked_plist()).filter(|job| job.managed && job.label == layout.label))
+}
+
+/// Stops the job and, for a job this app wrote, moves its file out of
+/// LaunchAgents so the next login does not start it again. A job that was not
+/// loaded is left where it is: the service's own updater unloads the job for
+/// a moment while it switches versions and needs the file in place.
+/// Returns whether the file was set aside.
+pub fn stop_job(layout: &Layout, job: &Job, timeout: Duration) -> Result<bool, String> {
+    let was_loaded = loaded(&job.label).is_some();
+    bootout(&job.label, timeout)?;
+    if !(was_loaded && job.managed && job.plist == layout.plist_path()) { return Ok(false) }
+    park(&job.plist, &layout.parked_plist()).map(|()| true)
+}
+
+fn park(own: &Path, parked: &Path) -> Result<(), String> {
+    let dir = parked.parent().ok_or("parked job file has no directory")?;
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    fs::rename(own, parked).map_err(|e| format!("the service stopped, but its job file could not be set aside ({e}); it will start again at the next login"))
+}
+
+/// After the job file is back in LaunchAgents the parked copy is stale.
+pub fn discard_parked(layout: &Layout) {
+    let parked = layout.parked_plist();
+    if read_job(&parked).is_some_and(|job| job.managed) { let _ = fs::remove_file(parked); }
+}
+
+/// Deletes the job files this app wrote, in LaunchAgents and parked, and
+/// nothing else: a file without the marker is never removed. Returns what was
+/// deleted.
+pub fn remove_job_files(layout: &Layout) -> Result<Vec<PathBuf>, String> {
+    let mut removed = Vec::new();
+    for file in [layout.plist_path(), layout.parked_plist()] {
+        if !read_job(&file).is_some_and(|job| job.managed && job.label == layout.label) { continue }
+        fs::remove_file(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+        removed.push(file);
+    }
+    Ok(removed)
 }
 
 pub struct JobSpec<'a> {
@@ -214,6 +255,76 @@ mod tests {
         dict.insert("ProgramArguments".into(), Value::Array(["/opt/homebrew/bin/node", "/opt/homebrew/bin/sbot", "start", "--ui"]
             .iter().map(|s| Value::String(s.to_string())).collect()));
         assert_eq!(job_from(&dict, Path::new("/p")), None);
+    }
+
+    fn scratch(name: &str) -> Layout {
+        let home = std::env::temp_dir().join(format!("sintbot-desktop-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join("Library/LaunchAgents")).unwrap();
+        Layout { root: home.join("root"), home, data_dir: None, label: "com.sintbot.test.unit".into(), port: 4699, overridden: true }
+    }
+
+    fn own_job(layout: &Layout, version: &str) -> Dictionary {
+        build_plist(&JobSpec { layout, node: Path::new("/n"), entry: &layout.release_entry(version), path_env: "/bin", bundle_id: "b" })
+    }
+
+    #[test]
+    fn a_parked_job_is_found_and_keeps_its_entry() {
+        let layout = scratch("park");
+        assert_eq!(find_existing(&layout), None);
+        write_plist(&layout.plist_path(), &own_job(&layout, "1.5.0")).unwrap();
+        park(&layout.plist_path(), &layout.parked_plist()).unwrap();
+        assert!(!layout.plist_path().exists(), "nothing is left for launchd to load at login");
+        let job = find_existing(&layout).unwrap();
+        assert!(job.managed);
+        assert_eq!((job.plist.clone(), job.entry.clone()), (layout.parked_plist(), layout.release_entry("1.5.0")));
+        // Back in LaunchAgents, that file wins and the parked copy is dropped.
+        write_plist(&layout.plist_path(), &own_job(&layout, "1.6.0")).unwrap();
+        assert_eq!(find_existing(&layout).unwrap().entry, layout.release_entry("1.6.0"));
+        discard_parked(&layout);
+        assert!(!layout.parked_plist().exists());
+        fs::remove_dir_all(&layout.home).unwrap();
+    }
+
+    #[test]
+    fn a_job_on_the_same_port_wins_over_a_parked_one() {
+        let layout = scratch("adopt");
+        write_plist(&layout.parked_plist(), &own_job(&layout, "1.5.0")).unwrap();
+        let mut foreign = own_job(&layout, "1.4.0");
+        foreign.insert("Label".into(), Value::String("com.example.sintbot".into()));
+        foreign.insert("EnvironmentVariables".into(), Value::Dictionary(Dictionary::new()));
+        write_plist(&layout.launch_agents().join("com.example.sintbot.plist"), &foreign).unwrap();
+        let job = find_existing(&layout).unwrap();
+        assert_eq!((job.label.as_str(), job.managed), ("com.example.sintbot", false));
+        fs::remove_dir_all(&layout.home).unwrap();
+    }
+
+    #[test]
+    fn removal_only_deletes_files_this_app_wrote() {
+        let layout = scratch("remove");
+        // Someone else's file under our name: no marker, so it stays.
+        let mut theirs = own_job(&layout, "1.4.0");
+        theirs.insert("EnvironmentVariables".into(), Value::Dictionary(Dictionary::new()));
+        write_plist(&layout.plist_path(), &theirs).unwrap();
+        write_plist(&layout.parked_plist(), &own_job(&layout, "1.5.0")).unwrap();
+        assert_eq!(remove_job_files(&layout).unwrap(), [layout.parked_plist()]);
+        assert!(layout.plist_path().exists());
+        write_plist(&layout.plist_path(), &own_job(&layout, "1.5.0")).unwrap();
+        assert_eq!(remove_job_files(&layout).unwrap(), [layout.plist_path()]);
+        assert_eq!(remove_job_files(&layout).unwrap(), Vec::<PathBuf>::new());
+        fs::remove_dir_all(&layout.home).unwrap();
+    }
+
+    #[test]
+    fn stopping_a_job_that_is_not_loaded_leaves_its_file_in_place() {
+        // The state the service's updater creates between unloading the old
+        // version and loading the new one.
+        let layout = scratch("updater");
+        write_plist(&layout.plist_path(), &own_job(&layout, "1.5.0")).unwrap();
+        let job = read_job(&layout.plist_path()).unwrap();
+        assert_eq!(stop_job(&layout, &job, Duration::from_secs(1)), Ok(false));
+        assert!(layout.plist_path().exists() && !layout.parked_plist().exists());
+        fs::remove_dir_all(&layout.home).unwrap();
     }
 
     #[test]

@@ -15,14 +15,24 @@ The app is a shell around the unchanged SintBot service. It draws one page of it
 | Runs in the background | Writes a per-user launchd job (`~/Library/LaunchAgents/com.sintbot.daemon.plist`) that starts `node <entry> start --ui --no-open`, restarts it if it exits and starts it at login. |
 | Finds Codex and Claude Code | Asks the user's login shell for its `PATH` once and writes it into the job; the bundled runtime is appended as a fallback. |
 | Shows the console | The window loads `http://127.0.0.1:4600/` once the service answers. Links that leave the console open in the default browser. |
-| Menu bar | Status, open console, start, stop, restart, show log, quit. Closing the window leaves the app in the menu bar; quitting the app leaves the service running. |
+| Menu bar | Status, open console, start, stop, restart, show log, quit, remove the background service. Closing the window leaves the app in the menu bar; quitting the app leaves the service running. |
+| Follows the system appearance | The status page uses the console's light and dark palettes and follows the system setting. |
 
 Service upgrades need nothing from the app. The job has exactly the shape the service's updater looks for, so "Upgrade now" in the console installs the new version beside the old one, switches the job and rolls back if the groups do not reconnect. A new app release is only needed for a new Node.js runtime or a change to the shell itself.
+
+## Stop, login and removal
+
+- **A running service starts again at login.** The job file sits in `~/Library/LaunchAgents`, which launchd loads at every login, with `RunAtLoad` and `KeepAlive` set.
+- **A stopped service stays stopped.** "Stop SintBot" and "Stop SintBot and Quit" unload the job and move its file to `~/.local/share/sintbot/launchd/`, so the next login starts nothing. Starting it (the menu, the status page, or opening the app) moves the file back. "Restart" does not move it.
+- **Remove Background Service…** stops the service and deletes the job file the app wrote, then quits. Settings, records, installed versions and the runtime are left in place; opening the app again installs the job again. To uninstall completely, remove the service this way, drag the app to the Trash, and delete `~/.local/share/sintbot` and the data directory yourself if you no longer want them.
+- Both only ever act on a job the app wrote (it carries the `SINTBOT_DESKTOP` marker). An adopted job is unloaded by Stop but its file is not moved, and removal refuses it.
+
+There is no "do not start at login" switch for a service that is left running, and the job file cannot provide one. With `KeepAlive` set, launchd starts the job whenever it loads it, whatever `RunAtLoad` says; a job that does not start on load would also not start when the service's updater loads the new version, because that is the same launchd operation on the same file. Disabling the job (`launchctl disable`, which is also what the switch in System Settings › Login Items does) keeps it from loading at login, but then the updater's reload fails too and a console upgrade leaves the service down. A real switch needs the service's updater to enable the job before it loads it and restore the setting afterwards.
 
 ## What the app never does
 
 - Restart a running service because the app was opened.
-- Edit a launchd job it did not write. An existing SintBot job on the same port is adopted as it is: the app shows its console and can start or stop it.
+- Edit, move or delete a launchd job it did not write. An existing SintBot job on the same port is adopted as it is: the app shows its console and can start or stop it.
 - Start a second service. If SintBot already runs in a terminal (its lock file names a live process), or another program holds the port, the app stops before installing anything and says so.
 - Downgrade. If the service upgraded itself past the bundled version, the job keeps the newer one.
 - Touch the service's data directory. The log goes to `~/Library/Logs/SintBot/daemon.log`.
@@ -54,6 +64,7 @@ bash scripts/stage-payload.sh ../sintbot   # a local source tree, or a version, 
 npm run build:local                        # SintBot.app, unsigned
 scripts/dev-run.sh                         # opens the app; service on port 4631, label com.sintbot.daemon.dev
 scripts/dev-run.sh --stop                  # --start, --restart, --quit drive the running app
+scripts/dev-run.sh --remove-service        # stop the dev service and delete its job; keeps the dev root and data
 scripts/dev-run.sh --clean                 # stop the dev service and delete everything it created
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
@@ -88,8 +99,9 @@ Signing validation and remaining checks:
 - Apple silicon only. An Intel build needs the x64 runtime and a universal shell.
 - The app does not update itself; replace it with a newer disk image. The service inside updates from the console.
 - Codex or Claude Code must already be installed and signed in. The status page shows which were found.
-- Stop holds until the next login or Start; there is no "do not start at login" switch yet.
-- Deleting the app does not remove the service. Choose "Stop SintBot and Quit" first, then delete `~/Library/LaunchAgents/com.sintbot.daemon.plist`.
+- A service left running starts again at login; there is no switch for that yet (see "Stop, login and removal").
+- Deleting the app alone does not remove the service. Choose "Remove Background Service…" first.
+- The Mac is not kept awake while a task runs, and the app does not announce finished tasks. Every `/api/` route of the console needs the console's token or a signed-in session, so the app has nothing it can ask without credentials. It needs a route such as `GET /api/local/activity`, answered without a token only for loopback requests that carry no proxy headers and send `X-Sbot-Local: 1` (the rule the service already applies to its local link route), returning counts only: `{ "active": 1, "waiting": 0, "lastSettledAt": 1763000000000 }`.
 - The icon is a placeholder drawn from the SintBot mark (`scripts/make-icons.js`).
 
 ## License

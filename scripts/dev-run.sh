@@ -3,6 +3,7 @@
 # launchd label and port, so it can sit next to a real installation.
 #   scripts/dev-run.sh                 start the app (or show its window)
 #   scripts/dev-run.sh --stop|--start|--restart|--quit   drive the running app
+#   scripts/dev-run.sh --remove-service   stop the dev service, delete its launchd job, quit; keeps the dev root and data
 #   scripts/dev-run.sh --clean         stop the dev service and delete everything it created
 set -euo pipefail
 cd "$(dirname "$0")/.."
