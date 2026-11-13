@@ -83,7 +83,7 @@ On the Mac with the Developer ID certificate:
 export APPLE_SIGNING_IDENTITY="Developer ID Application: … (TEAMID)"
 export APPLE_API_KEY="<key ID>" APPLE_API_ISSUER="<issuer ID>"
 export APPLE_API_KEY_PATH="/secure/path/AuthKey_<key ID>.p8"
-scripts/release-macos.sh 1.4.19
+scripts/release-macos.sh 1.4.20
 ```
 
 The script stages the published service version, builds, signs with the hardened runtime, notarizes and staples the app and the disk image, then validates the App inside the read-only mounted image, runs Gatekeeper checks and prints the image's SHA-256. Keep the API private key outside the repository. Apple ID app-specific password credentials remain an alternative supported by the script.
@@ -101,7 +101,7 @@ Signing validation and remaining checks:
 - Codex or Claude Code must already be installed and signed in. The status page shows which were found.
 - A service left running starts again at login; there is no switch for that yet (see "Stop, login and removal").
 - Deleting the app alone does not remove the service. Choose "Remove Background Service…" first.
-- The Mac is not kept awake while a task runs, and the app does not announce finished tasks. Service 1.4.19 provides `GET /api/shell/activity`, answered without a token only to loopback requests that carry no proxy headers and send `X-Sbot-Local: 1`, returning counts only (`running`, `active`, `waiting`, `queued`, `held`); the app does not use it yet.
+- The Mac is not kept awake while a task runs, and the app does not announce finished tasks. Service 1.4.20 provides `GET /api/shell/activity`, answered without a token only to loopback requests that carry no proxy headers and send `X-Sbot-Local: 1`, returning counts only (`running`, `active`, `waiting`, `queued`, `held`); the app does not use it yet.
 - The icon is a placeholder drawn from the SintBot mark (`scripts/make-icons.js`).
 
 ## License
