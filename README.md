@@ -101,7 +101,7 @@ Signing validation and remaining checks:
 - Codex or Claude Code must already be installed and signed in. The status page shows which were found.
 - A service left running starts again at login; there is no switch for that yet (see "Stop, login and removal").
 - Deleting the app alone does not remove the service. Choose "Remove Background Service…" first.
-- The Mac is not kept awake while a task runs, and the app does not announce finished tasks. Every `/api/` route of the console needs the console's token or a signed-in session, so the app has nothing it can ask without credentials. It needs a route such as `GET /api/local/activity`, answered without a token only for loopback requests that carry no proxy headers and send `X-Sbot-Local: 1` (the rule the service already applies to its local link route), returning counts only: `{ "active": 1, "waiting": 0, "lastSettledAt": 1763000000000 }`.
+- The Mac is not kept awake while a task runs, and the app does not announce finished tasks. The released service (1.4.18) answers no `/api/` route without the console's token. The next service line adds `GET /api/shell/activity`, answered without a token only to loopback requests that carry no proxy headers and send `X-Sbot-Local: 1`, returning counts only (`running`, `active`, `waiting`, `queued`, `held`); the app does not use it yet.
 - The icon is a placeholder drawn from the SintBot mark (`scripts/make-icons.js`).
 
 ## License
