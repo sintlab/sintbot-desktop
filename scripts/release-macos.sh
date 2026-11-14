@@ -43,7 +43,8 @@ fi
 # The Tauri CLI signs the app with the hardened runtime, notarizes and staples it
 # when the variables above are present, then builds the disk image from it.
 npx tauri build --bundles app,dmg
-dmgs=(src-tauri/target/release/bundle/dmg/*.dmg)
+app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+dmgs=(src-tauri/target/release/bundle/dmg/*_"${app_version}"_*.dmg)
 [ "${#dmgs[@]}" = 1 ] && [ -f "${dmgs[0]}" ] ||
   { echo "Expected exactly one DMG in the bundle directory" >&2; exit 1; }
 dmg="${dmgs[0]}"

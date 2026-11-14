@@ -2,7 +2,7 @@
 
 A menu-bar app that removes the terminal from installing and running SintBot. Download the disk image, drag the app to Applications, open it: the window shows the service's connect page, and once a chat platform is connected it shows the console.
 
-The app knows nothing about chat platforms. Which ones can be connected (Feishu today; Slack once the service accepts it again) is decided by the service version inside, and the connect page and console are the service's own.
+The app knows nothing about chat platforms. Which ones can be connected (Feishu and WeCom; Slack once the service accepts it again) is decided by the service version inside, and the connect page and console are the service's own.
 
 The app is a shell around the unchanged SintBot service. It draws one page of its own (the status page shown while the service is being installed, started or is stopped). Everything else in its window is the console the service already serves to a browser, so the desktop and web versions are one interface.
 
