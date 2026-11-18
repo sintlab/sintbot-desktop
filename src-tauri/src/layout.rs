@@ -96,6 +96,8 @@ impl Layout {
             self.home.join("Library/Logs/SintBot/daemon.log")
         }
     }
+    /// The app's own log (update checks and installations), next to the service log.
+    pub fn app_log_file(&self) -> PathBuf { self.log_file().with_file_name("desktop.log") }
     pub fn launch_agents(&self) -> PathBuf { self.home.join("Library/LaunchAgents") }
     pub fn plist_path(&self) -> PathBuf { self.launch_agents().join(format!("{}.plist", self.label)) }
     /// Where the job file waits while the service is stopped from the app.

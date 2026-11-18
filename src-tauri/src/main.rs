@@ -9,6 +9,7 @@ mod layout;
 mod provision;
 mod service;
 mod shellenv;
+mod update;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -75,6 +76,7 @@ struct Status {
     log_file: String,
     log_tail: Vec<String>,
     lang: &'static str,
+    update: update::Report,
 }
 
 enum Cmd {
@@ -88,6 +90,7 @@ struct Shared {
     tx: Mutex<Sender<Cmd>>,
     launcher: Mutex<Option<Url>>,
     tray: Mutex<Option<TrayItems>>,
+    update: update::Updates,
 }
 
 struct TrayItems {
@@ -95,6 +98,7 @@ struct TrayItems {
     start: MenuItem<tauri::Wry>,
     stop: MenuItem<tauri::Wry>,
     restart: MenuItem<tauri::Wry>,
+    update: MenuItem<tauri::Wry>,
 }
 
 struct Text {
@@ -106,6 +110,12 @@ struct Text {
     confirm_restart: &'static str, cancel: &'static str,
     s_preparing: &'static str, s_starting: &'static str, s_setup: &'static str, s_running: &'static str,
     s_stopping: &'static str, s_stopped: &'static str, s_failed: &'static str,
+    // Updates of the app. `{new}` and `{cur}` stand for the versions.
+    update: &'static str, u_checking: &'static str, u_downloading: &'static str, u_installing: &'static str,
+    u_found_title: &'static str, u_found_body: &'static str, u_install: &'static str, u_later: &'static str,
+    u_current_title: &'static str, u_current_body: &'static str, u_check_failed: &'static str, u_install_failed: &'static str,
+    u_network: &'static str, u_signature: &'static str, u_unchanged: &'static str,
+    u_move_title: &'static str, u_move_body: &'static str, u_not_app: &'static str, u_unconfigured: &'static str,
 }
 
 const ZH: Text = Text {
@@ -120,6 +130,18 @@ const ZH: Text = Text {
     restart_body: "正在进行的任务会被中断，随后服务重新启动。", confirm_stop: "停止", confirm_restart: "重启", cancel: "取消",
     s_preparing: "正在准备…", s_starting: "正在启动…", s_setup: "等待接入聊天平台", s_running: "运行中",
     s_stopping: "正在停止…", s_stopped: "已停止", s_failed: "未能启动",
+    update: "检查更新…", u_checking: "正在检查更新…", u_downloading: "正在下载更新…", u_installing: "正在安装更新…",
+    u_found_title: "SintBot App 有新版本",
+    u_found_body: "新版本 {new} 可以安装了（当前是 {cur}）。安装后 App 会自动重新打开；机器人一直在后台运行，不会中断。",
+    u_install: "安装并重新打开", u_later: "以后再说",
+    u_current_title: "已是最新版本", u_current_body: "SintBot App {cur} 已经是最新版本。",
+    u_check_failed: "未能检查更新", u_install_failed: "更新没有装上",
+    u_network: "连不上更新服务器。请检查网络后再试，也可以到 github.com/sintlab/sintbot-desktop/releases 手动下载新版本。",
+    u_signature: "下载的更新没有通过签名校验，已经丢弃。当前版本没有改动。", u_unchanged: "当前版本没有改动。",
+    u_move_title: "请先把 SintBot 移到“应用程序”文件夹",
+    u_move_body: "新版本 {new} 可以安装了，但 SintBot 现在是从磁盘映像或临时位置打开的，无法在这里更新。请退出 App，把 SintBot 拖进“应用程序”文件夹，再从那里打开并更新。",
+    u_not_app: "新版本 {new} 可以安装了，但这个 SintBot 不是从 App 包里运行的，无法自行更新。",
+    u_unconfigured: "这个版本没有配置更新。",
 };
 const EN: Text = Text {
     open: "Open Console", browser: "Open in Browser", start: "Start SintBot", stop: "Stop SintBot", restart: "Restart SintBot",
@@ -133,6 +155,19 @@ const EN: Text = Text {
     restart_body: "Running tasks are interrupted, then the service starts again.", confirm_stop: "Stop", confirm_restart: "Restart", cancel: "Cancel",
     s_preparing: "Preparing…", s_starting: "Starting…", s_setup: "Waiting for chat setup", s_running: "Running",
     s_stopping: "Stopping…", s_stopped: "Stopped", s_failed: "Could not start",
+    update: "Check for Updates…", u_checking: "Checking for Updates…", u_downloading: "Downloading Update…", u_installing: "Installing Update…",
+    u_found_title: "A new version of the SintBot app is available",
+    u_found_body: "Version {new} is ready to install (you have {cur}). The app reopens by itself afterwards; SintBot keeps running in the background and is not interrupted.",
+    u_install: "Install and Restart", u_later: "Later",
+    u_current_title: "You're up to date", u_current_body: "SintBot {cur} is the latest version of the app.",
+    u_check_failed: "Could not check for updates", u_install_failed: "The update was not installed",
+    u_network: "The update server could not be reached. Check the network and try again, or download the new version from github.com/sintlab/sintbot-desktop/releases.",
+    u_signature: "The downloaded update did not pass the signature check and was discarded. The installed version is unchanged.",
+    u_unchanged: "The installed version is unchanged.",
+    u_move_title: "Move SintBot to the Applications folder first",
+    u_move_body: "Version {new} is ready to install, but SintBot was opened from a disk image or a temporary location and cannot be updated there. Quit the app, drag SintBot to the Applications folder, then open it from there and update.",
+    u_not_app: "Version {new} is ready to install, but this copy of SintBot does not run from an app bundle and cannot update itself.",
+    u_unconfigured: "Updates are not configured in this build.",
 };
 
 fn system_lang() -> &'static str {
@@ -210,6 +245,13 @@ fn allow_navigation(url: &Url) -> bool {
         "http" | "https" | "mailto" => { open_with_system(url.as_str()); false }
         _ => false,
     }
+}
+
+/// `sintbot-app:<request>`: a page asking the app to do something of its own.
+/// The only request is `check-update`, which does what the menu item does; the
+/// user is still asked before anything is installed.
+fn app_request(url: &Url) -> Option<&str> {
+    (url.scheme() == "sintbot-app").then(|| url.path())
 }
 
 fn percent_decode(input: &str) -> String {
@@ -527,6 +569,8 @@ fn second_launch(app: &AppHandle, args: &[String]) {
         Some("--stop") => send(app, Cmd::Stop),
         Some("--restart") => send(app, Cmd::Restart),
         Some("--remove-service") => send(app, Cmd::RemoveService { quiet: true }),
+        Some("--check-update") => update::start(app, update::Trigger::Script { install: false }),
+        Some("--install-update") => update::start(app, update::Trigger::Script { install: true }),
         Some("--quit") => app.exit(0),
         _ => show_main(app),
     }
@@ -564,11 +608,13 @@ fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
     let stop = item("stop", t.stop, false)?;
     let restart = item("restart", t.restart, false)?;
     let logs = item("logs", t.logs, true)?;
+    let update = item("update", t.update, app.state::<Arc<Shared>>().update.source.configured)?;
     let remove = item("remove", t.remove, true)?;
     let quit = item("quit", t.quit, true)?;
     let stop_quit = item("stop_quit", t.stop_quit, true)?;
     let menu = Menu::with_items(app, &[&status, &PredefinedMenuItem::separator(app)?, &open, &browser,
         &PredefinedMenuItem::separator(app)?, &start, &stop, &restart, &logs,
+        &PredefinedMenuItem::separator(app)?, &update,
         &PredefinedMenuItem::separator(app)?, &quit, &stop_quit,
         &PredefinedMenuItem::separator(app)?, &remove])?;
     TrayIconBuilder::with_id("main")
@@ -591,6 +637,7 @@ fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
                     let file = app.state::<Arc<Shared>>().status.lock().unwrap().log_file.clone();
                     if Path::new(&file).is_file() { open_with_system(&file) }
                 }
+                "update" => update::start(app, update::Trigger::User),
                 "quit" => app.exit(0),
                 "stop_quit" => confirm_then(app, t.stop_body, t.confirm_stop, || Cmd::StopAndQuit),
                 "remove" => {
@@ -606,7 +653,7 @@ fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
             }
         })
         .build(app)?;
-    Ok(TrayItems { status, start, stop, restart })
+    Ok(TrayItems { status, start, stop, restart, update })
 }
 
 fn main() {
@@ -615,21 +662,31 @@ fn main() {
         Err(error) => { eprintln!("SintBot: {error}"); std::process::exit(2) }
     };
     let lang = system_lang();
+    let mut context = tauri::generate_context!();
+    let app_version = context.package_info().version.to_string();
+    let updates = update::Updates::new(
+        update::prepare(context.config_mut(), std::env::var(update::ENDPOINT_ENV).ok().as_deref()), &layout, &app_version);
+    let update_configured = updates.source.configured;
     let (tx, rx) = mpsc::channel();
     let shared = Arc::new(Shared {
         status: Mutex::new(Status {
-            phase: Phase::Preparing, error: None, app_version: env!("CARGO_PKG_VERSION").to_string(),
+            phase: Phase::Preparing, error: None, app_version,
             node_version: None, service_version: None, codex: None, claude: None, label: layout.label.clone(),
             pid: None, http: Http::Down, url: layout.console_url(), adopted: false, development: layout.overridden,
             log_file: layout.log_file().to_string_lossy().to_string(), log_tail: Vec::new(), lang,
+            update: updates.initial_report(),
         }),
-        tx: Mutex::new(tx), launcher: Mutex::new(None), tray: Mutex::new(None),
+        tx: Mutex::new(tx), launcher: Mutex::new(None), tray: Mutex::new(None), update: updates,
     });
     let worker_shared = shared.clone();
     let mut rx = Some(rx);
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| second_launch(app, &args)))
-        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init());
+    // Only Rust calls the updater. No capability grants its commands to a page,
+    // and a build without a public key does not load it at all.
+    if update_configured { builder = builder.plugin(tauri_plugin_updater::Builder::new().build()); }
+    builder
         .manage(shared)
         .invoke_handler(tauri::generate_handler![status, service_action, open_logs])
         .setup(move |app| {
@@ -656,6 +713,12 @@ fn main() {
                     if let Err(error) = &removed { eprintln!("SintBot: {error}"); }
                     std::process::exit(if removed.is_ok() { 0 } else { 1 });
                 }
+                Some(flag @ ("--check-update" | "--install-update")) => {
+                    #[cfg(target_os = "macos")]
+                    let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+                    update::headless(app.handle(), flag == "--install-update");
+                    return Ok(());
+                }
                 _ => {}
             }
             let handle = app.handle().clone();
@@ -670,11 +733,18 @@ fn main() {
                 None => WebviewUrl::App("index.html".into()),
             };
             let (r, g, b) = if system_dark() { (0x13, 0x17, 0x1c) } else { (0xf6, 0xf5, 0xf1) };
+            let bridge = handle.clone();
             let window = WebviewWindowBuilder::new(app, "main", first_page)
                 .title("SintBot").inner_size(1080.0, 720.0).min_inner_size(820.0, 560.0)
                 .background_color(tauri::window::Color(r, g, b, 255))
                 .initialization_script(INIT_JS)
-                .on_navigation(allow_navigation)
+                // Lets a console offer its own "check for updates" button only where it works.
+                .initialization_script(if update_configured { "window.__SINTBOT_DESKTOP_UPDATE__ = true;" } else { "" })
+                .on_navigation(move |url| match app_request(url) {
+                    Some("check-update") => { update::start(&bridge, update::Trigger::User); false }
+                    Some(_) => false,
+                    None => allow_navigation(url),
+                })
                 // The native file-drop handler claims every drag on macOS and never hands it to
                 // the page, so the console's HTML5 drag reordering got no dragover/drop. Nothing
                 // in the app takes native file drops.
@@ -690,6 +760,8 @@ fn main() {
                 std::thread::Builder::new().name("service".into()).spawn(move || worker.run(rx))?;
                 send(&handle, Cmd::Ensure);
             }
+            worker_shared.update.log(&format!("SintBot for macOS {} started", handle.package_info().version));
+            update::schedule(&handle, layout.overridden);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -699,7 +771,7 @@ fn main() {
                 hide_main(window.app_handle());
             }
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("SintBot could not start")
         .run(|app, event| match event {
             #[cfg(target_os = "macos")]
@@ -718,9 +790,17 @@ mod tests {
         for allowed in ["tauri://localhost/index.html", "http://127.0.0.1:4600/", "http://localhost:4631/x", "about:blank"] {
             assert!(allow_navigation(&Url::parse(allowed).unwrap()), "{allowed}");
         }
-        for refused in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com/"] {
+        for refused in ["file:///etc/passwd", "javascript:alert(1)", "ftp://example.com/", "sintbot-app:check-update"] {
             assert!(!allow_navigation(&Url::parse(refused).unwrap()), "{refused}");
         }
+    }
+
+    #[test]
+    fn pages_can_only_ask_for_an_update_check() {
+        assert_eq!(app_request(&Url::parse("sintbot-app:check-update").unwrap()), Some("check-update"));
+        assert_eq!(app_request(&Url::parse("sintbot-app:install-update").unwrap()), Some("install-update"));
+        assert_eq!(app_request(&Url::parse("sintbot-open:https%3A%2F%2Fsintbot.com").unwrap()), None);
+        assert_eq!(app_request(&Url::parse("http://127.0.0.1:4600/sintbot-app:check-update").unwrap()), None);
     }
 
     #[test]
