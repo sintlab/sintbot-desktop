@@ -1,6 +1,6 @@
 {
   "name": "sintbot-desktop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "SintBot for macOS: a menu-bar app that installs, runs and updates the SintBot service.",
   "scripts": {

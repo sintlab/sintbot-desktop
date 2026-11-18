@@ -675,6 +675,10 @@ fn main() {
                 .background_color(tauri::window::Color(r, g, b, 255))
                 .initialization_script(INIT_JS)
                 .on_navigation(allow_navigation)
+                // The native file-drop handler claims every drag on macOS and never hands it to
+                // the page, so the console's HTML5 drag reordering got no dragover/drop. Nothing
+                // in the app takes native file drops.
+                .disable_drag_drop_handler()
                 .build()?;
             *worker_shared.launcher.lock().unwrap() = window.url().ok();
             let resources = std::env::var_os("SINTBOT_DESKTOP_RESOURCES").map(PathBuf::from)
