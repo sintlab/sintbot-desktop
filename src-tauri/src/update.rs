@@ -435,7 +435,7 @@ mod tests {
         for accepted in ["https://example.com/latest.json", "http://127.0.0.1:8765/latest.json", "http://localhost:8765/x", "http://[::1]:8765/x"] {
             assert!(endpoint_override(accepted).is_ok(), "{accepted}");
         }
-        for refused in ["http://example.com/latest.json", "http://192.168.1.5/latest.json", "http://127.0.0.1.example.com/x",
+        for refused in ["http://example.com/latest.json", "http://203.0.113.5/latest.json", "http://127.0.0.1.example.com/x",
             "file:///tmp/latest.json", "ftp://127.0.0.1/x", "latest.json", ""] {
             assert!(endpoint_override(refused).is_err(), "{refused}");
         }
