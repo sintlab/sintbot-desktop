@@ -1,6 +1,6 @@
 [package]
 name = "sintbot-desktop"
-version = "0.1.5"
+version = "0.1.6"
 description = "SintBot for macOS"
 edition = "2021"
 rust-version = "1.80"
