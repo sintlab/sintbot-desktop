@@ -17,6 +17,9 @@
 #     or TAURI_SIGNING_PRIVATE_KEY (the key text, or a path to it)
 # Optional:
 #   SINTBOT_UPDATE_NOTES     the "notes" text in latest.json
+#   SINTBOT_ARCH             aarch64 (default, Apple silicon) or x86_64 (Intel). Build
+#                            aarch64 first, then x86_64: the second run adds its
+#                            platform to the latest.json the first one wrote.
 #   SINTBOT_RESIGN_NODE=1    sign the bundled Node.js binary with the identity above
 #                            instead of keeping the Node.js project's signature. Use it
 #                            if notarization objects to that binary (it requests
@@ -24,6 +27,14 @@
 #                            entitlements V8 needs and drops that one.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+case "${SINTBOT_ARCH:-aarch64}" in
+  aarch64|arm64) arch=aarch64 node_arch=arm64 ;;
+  x86_64|x64) arch=x86_64 node_arch=x64 ;;
+  *) echo "SINTBOT_ARCH is aarch64 or x86_64" >&2; exit 1 ;;
+esac
+rust_target="$arch-apple-darwin"
+rustup target list --installed 2>/dev/null | grep -qx "$rust_target" ||
+  { echo "Install the Rust target first: rustup target add $rust_target" >&2; exit 1; }
 : "${APPLE_SIGNING_IDENTITY:?Set APPLE_SIGNING_IDENTITY to the Developer ID Application identity}"
 security find-identity -v -p codesigning | grep -F "$APPLE_SIGNING_IDENTITY" >/dev/null ||
   { echo "The signing identity is not in the keychain" >&2; exit 1; }
@@ -74,7 +85,7 @@ npm ci --no-audit --no-fund
 printf 'sintbot updater key check\n' > "$work/probe"
 sign_update "$work/probe" && node scripts/updater-manifest.js "$work/probe" "$app_version" ||
   { echo "The update signing key cannot be used, or does not belong to the public key in src-tauri/tauri.conf.json" >&2; exit 1; }
-bash scripts/fetch-runtime.sh
+SINTBOT_NODE_ARCH="$node_arch" bash scripts/fetch-runtime.sh
 bash scripts/stage-payload.sh "${1:-latest}"
 node_bin=src-tauri/resources/runtime/bin/node
 if [ "${SINTBOT_RESIGN_NODE:-0}" = 1 ]; then
@@ -88,8 +99,8 @@ fi
 # createUpdaterArtifacts it finally archives that same app as SintBot.app.tar.gz
 # and signs the archive with the update key. The option is given here and not in
 # tauri.conf.json so that `npm run build:local` needs no key.
-with_update_key npx tauri build --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":true}}'
-dmgs=(src-tauri/target/release/bundle/dmg/*_"${app_version}"_*.dmg)
+with_update_key npx tauri build --target "$rust_target" --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":true}}'
+dmgs=(src-tauri/target/"$rust_target"/release/bundle/dmg/*_"${app_version}"_*.dmg)
 [ "${#dmgs[@]}" = 1 ] && [ -f "${dmgs[0]}" ] ||
   { echo "Expected exactly one DMG in the bundle directory" >&2; exit 1; }
 dmg="${dmgs[0]}"
@@ -114,7 +125,7 @@ codesign -dvv "$app/Contents/Resources/runtime/bin/node" 2>&1 | grep -E 'Authori
 # the archive after all of that (see the README), and this checks the result
 # instead of trusting the order: the archive is unpacked and the app inside is
 # examined the way the disk image's copy was.
-bundle_dir=src-tauri/target/release/bundle/macos
+bundle_dir=src-tauri/target/"$rust_target"/release/bundle/macos
 archive="$bundle_dir/SintBot.app.tar.gz"
 [ -f "$archive" ] && [ -f "$archive.sig" ] ||
   { echo "The build produced no update archive with a signature in $bundle_dir" >&2; exit 1; }
@@ -141,14 +152,22 @@ fi
 # What goes on the GitHub Release. latest.json is only written after the
 # archive's signature verified against the public key the apps embed.
 out="dist/v$app_version"
-asset="SintBot_${app_version}_aarch64.app.tar.gz"
-rm -rf "$out" && mkdir -p "$out"
+asset="SintBot_${app_version}_${arch}.app.tar.gz"
+# The aarch64 run starts the directory afresh; the x86_64 run adds to it.
+if [ "$arch" = aarch64 ]; then rm -rf "$out"; fi
+mkdir -p "$out"
+rm -f "$out/$(basename "$dmg")" "$out/$asset" "$out/$asset.sig"
 cp "$dmg" "$out/"
 cp "$archive" "$out/$asset"
 cp "$archive.sig" "$out/$asset.sig"
-node scripts/updater-manifest.js "$out/$asset" "$app_version" --out "$out/latest.json" --notes "${SINTBOT_UPDATE_NOTES:-}"
+merge=()
+if [ "$arch" != aarch64 ]; then
+  [ -f "$out/latest.json" ] || { echo "Build aarch64 first: its latest.json is what this run adds to" >&2; exit 1; }
+  merge=(--merge "$out/latest.json")
+fi
+node scripts/updater-manifest.js "$out/$asset" "$app_version" --target "darwin-$arch" ${merge[@]+"${merge[@]}"} --out "$out/latest.json" --notes "${SINTBOT_UPDATE_NOTES:-}"
 
-printf '\nService %s · Node.js %s\n' "$(cat src-tauri/resources/payload/VERSION)" "$(cat src-tauri/resources/runtime/VERSION)"
+printf '\n%s · Service %s · Node.js %s (%s)\n' "$arch" "$(cat src-tauri/resources/payload/VERSION)" "$(cat src-tauri/resources/runtime/VERSION)" "$(cat src-tauri/resources/runtime/ARCH)"
 shasum -a 256 "$dmg"
 cat <<NOTE
 

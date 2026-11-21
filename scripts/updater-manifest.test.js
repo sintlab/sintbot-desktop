@@ -57,3 +57,16 @@ test('latest.json refuses a plain http archive and a malformed version', () => {
   assert.throws(() => manifest({ version: 'latest', signature: SIGNATURE, url: 'https://example.com/a.tar.gz' }), /not a version/);
   assert.ok(manifest({ version: '0.1.4', signature: SIGNATURE, url: 'http://127.0.0.1:8765/a.tar.gz' }));
 });
+
+test('one latest.json serves Apple silicon and Intel', () => {
+  const arm = manifest({ version: '0.1.7', signature: SIGNATURE, url: 'https://example.com/SintBot_0.1.7_aarch64.app.tar.gz', notes: 'Intel',
+    date: new Date('2026-11-21T07:00:00Z') });
+  const both = manifest({ version: '0.1.7', signature: 'X', url: 'https://example.com/SintBot_0.1.7_x86_64.app.tar.gz', target: 'darwin-x86_64', merge: arm });
+  assert.deepStrictEqual(Object.keys(both.platforms), ['darwin-aarch64', 'darwin-x86_64']);
+  assert.deepStrictEqual(both.platforms['darwin-aarch64'], arm.platforms['darwin-aarch64']);
+  assert.strictEqual(both.platforms['darwin-x86_64'].signature, 'X');
+  assert.strictEqual(both.notes, 'Intel');
+  assert.strictEqual(both.pub_date, '2026-11-21T07:00:00Z');
+  assert.throws(() => manifest({ version: '0.1.8', signature: 'X', url: 'https://example.com/a', target: 'darwin-x86_64', merge: arm }), /cannot merge/);
+  assert.throws(() => manifest({ version: '0.1.7', signature: 'X', url: 'https://example.com/a', target: 'linux-x86_64' }), /not a supported platform/);
+});

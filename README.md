@@ -27,7 +27,7 @@ The app (the shell, not the service) updates through [tauri-plugin-updater](http
 
 - **When.** 30 seconds after launch and every 6 hours after that, and from "Check for Updates…" in the menu. The automatic check says nothing unless a newer version exists, asks about a version once per run, and writes failures to the log only. The menu item always answers: a newer version, "You're up to date", or the reason the check failed.
 - **Asking first.** A dialog names the new version and offers "Install and Restart" or "Later". Nothing is downloaded before that.
-- **Installing.** The app downloads `SintBot_<version>_aarch64.app.tar.gz` from the release, checks its signature against the public key built into the app, swaps the bundle and reopens. Only a newer version is ever installed, and the signature must have been made for exactly the version the release announces (`requireSignedVersion`), so an older signed archive cannot be passed off as a new one. The background service is a launchd job; replacing and reopening the app does not stop or restart it.
+- **Installing.** The app downloads `SintBot_<version>_<arch>.app.tar.gz` (`aarch64` or `x86_64`) from the release, checks its signature against the public key built into the app, swaps the bundle and reopens. Only a newer version is ever installed, and the signature must have been made for exactly the version the release announces (`requireSignedVersion`), so an older signed archive cannot be passed off as a new one. The background service is a launchd job; replacing and reopening the app does not stop or restart it.
 - **Where it works.** The app must sit somewhere it can be replaced. Opened straight from the disk image, or run by Gatekeeper from a randomized read-only copy, it says "Move SintBot to the Applications folder first" instead of failing halfway. In `/Applications` owned by another user, macOS asks for an administrator password.
 - **Where it looks.** `https://github.com/sintlab/sintbot-desktop/releases/latest/download/latest.json`, which points at the archive under the release's own tag. When GitHub cannot be reached the check gives up after 20 seconds; a download that stalls for a minute is abandoned and the installed app is left as it was.
 - **Pages get no say.** All of this runs in Rust. No capability grants the updater's commands to any page, and the console (remote content from the local service) has no access to the app at all. A console can navigate to `sintbot-app:check-update`, which does what the menu item does (the user is still asked); `window.__SINTBOT_DESKTOP_UPDATE__` is `true` in shells that have it.
@@ -107,12 +107,15 @@ export APPLE_API_KEY="<key ID>" APPLE_API_ISSUER="<issuer ID>"
 export APPLE_API_KEY_PATH="/secure/path/AuthKey_<key ID>.p8"
 export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/.sintbot-release/updater.key"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="…"     # the empty string if the key has no password
-scripts/release-macos.sh 1.4.20
+scripts/release-macos.sh 1.4.20                       # Apple silicon
+SINTBOT_ARCH=x86_64 scripts/release-macos.sh 1.4.20   # Intel, after the line above
 ```
+
+Apple silicon and Intel are separate disk images. The Intel run needs `rustup target add x86_64-apple-darwin` once and builds with the x64 Node.js runtime; it adds `darwin-x86_64` to the `latest.json` the Apple silicon run wrote, so build both, in that order, before uploading.
 
 The script stages the published service version, builds, signs with the hardened runtime, notarizes and staples the app and the disk image, then validates the App inside the read-only mounted image, runs Gatekeeper checks and prints the image's SHA-256. Keep the API private key outside the repository. Apple ID app-specific password credentials remain an alternative supported by the script.
 
-It then prepares the update: the build archives the finished app as `SintBot.app.tar.gz` and signs the archive with the update key; the script unpacks that archive and puts the app inside through the same signature, Gatekeeper and stapling checks, verifies the archive's signature against the public key in `tauri.conf.json`, and writes `latest.json`. Everything to upload ends up in `dist/v<version>/`: the disk image, `SintBot_<version>_aarch64.app.tar.gz` and `latest.json`. Publish them on the release tagged `v<version>` and make it the latest release; a draft or pre-release is not offered to anyone.
+It then prepares the update: the build archives the finished app as `SintBot.app.tar.gz` and signs the archive with the update key; the script unpacks that archive and puts the app inside through the same signature, Gatekeeper and stapling checks, verifies the archive's signature against the public key in `tauri.conf.json`, and writes `latest.json`. Everything to upload ends up in `dist/v<version>/`: both disk images, `SintBot_<version>_aarch64.app.tar.gz`, `SintBot_<version>_x86_64.app.tar.gz` and `latest.json`. Publish them on the release tagged `v<version>` and make it the latest release; a draft or pre-release is not offered to anyone.
 
 ### The update signing key
 
@@ -141,7 +144,7 @@ Signing validation and remaining checks:
 
 ## Limits of this version
 
-- Apple silicon only. An Intel build needs the x64 runtime and a universal shell.
+- Intel: an unsigned build ran on a 2018 MacBook Pro (macOS 15.8): the app, the bundled Node.js and the service started. The signed, notarized Intel disk image and an Intel update remain to be checked.
 - Versions up to 0.1.3 do not update themselves; replace them once with a newer disk image. The service inside updates from the console.
 - Codex or Claude Code must already be installed and signed in. The status page shows which were found.
 - A service left running starts again at login; there is no switch for that yet (see "Stop, login and removal").

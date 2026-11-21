@@ -4,6 +4,11 @@
 //
 //   node scripts/updater-manifest.js <archive> <version>                  verify only
 //   node scripts/updater-manifest.js <archive> <version> --out latest.json [--notes text] [--url url]
+//                                    [--target darwin-x86_64] [--merge latest.json]
+//
+// --target names the platform the archive is for (default darwin-aarch64); --merge
+// keeps the other platforms of an existing latest.json for the same version, so
+// one manifest serves Apple silicon and Intel.
 //
 // The signature is read from <archive>.sig and checked against the public key
 // in src-tauri/tauri.conf.json (or --pubkey): the same key, the same minisign
@@ -16,7 +21,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const REPOSITORY = 'https://github.com/sintlab/sintbot-desktop';
-const TARGET = 'darwin-aarch64';
+const TARGETS = ['darwin-aarch64', 'darwin-x86_64'];
 const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
 
 function fail(message) { throw new Error(message); }
@@ -61,11 +66,18 @@ function verify(data, encodedSignature, encodedKey, version) {
   return { keyId: key.id, version: sig.version };
 }
 
-function manifest({ version, signature: encodedSignature, url, notes, date = new Date() }) {
+function manifest({ version, signature: encodedSignature, url, notes, target = TARGETS[0], merge, date = new Date() }) {
+  if (!TARGETS.includes(target)) fail(`not a supported platform: ${target}`);
   if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) fail(`not a version: ${version}`);
   if (!/^https:\/\//.test(url) && !/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])[:/]/.test(url)) fail(`the archive URL must be https: ${url}`);
-  return { version, notes: notes || `SintBot for macOS ${version}`, pub_date: date.toISOString().replace(/\.\d+Z$/, 'Z'),
-    platforms: { [TARGET]: { signature: String(encodedSignature).trim(), url } } };
+  const platforms = {};
+  if (merge) {
+    if (merge.version !== version) fail(`cannot merge latest.json for ${merge.version} into ${version}`);
+    for (const [name, entry] of Object.entries(merge.platforms || {})) if (name !== target) platforms[name] = entry;
+  }
+  platforms[target] = { signature: String(encodedSignature).trim(), url };
+  return { version, notes: notes || (merge && merge.notes) || `SintBot for macOS ${version}`,
+    pub_date: (merge && merge.pub_date) || date.toISOString().replace(/\.\d+Z$/, 'Z'), platforms };
 }
 
 function releaseUrl(version, archive) {
@@ -77,7 +89,7 @@ function main(argv) {
   const options = {};
   for (let i = 0; i < rest.length; i += 2) {
     const name = rest[i].replace(/^--/, '');
-    if (!['out', 'notes', 'url', 'pubkey'].includes(name) || rest[i + 1] === undefined) fail(`unknown or incomplete option: ${rest[i]}`);
+    if (!['out', 'notes', 'url', 'pubkey', 'target', 'merge'].includes(name) || rest[i + 1] === undefined) fail(`unknown or incomplete option: ${rest[i]}`);
     options[name] = rest[i + 1];
   }
   if (!archive || !version) fail('usage: updater-manifest.js <archive> <version> [--out latest.json] [--notes text] [--url url] [--pubkey key]');
@@ -88,9 +100,11 @@ function main(argv) {
   const checked = verify(fs.readFileSync(archive), encodedSignature, key, version);
   console.log(`Signature of ${path.basename(archive)} verifies: key ${checked.keyId}, version ${checked.version}`);
   if (!options.out) return;
-  const document = manifest({ version, signature: encodedSignature, url: options.url || releaseUrl(version, archive), notes: options.notes });
+  const merge = options.merge ? JSON.parse(fs.readFileSync(options.merge, 'utf8')) : undefined;
+  const target = options.target || TARGETS[0];
+  const document = manifest({ version, signature: encodedSignature, url: options.url || releaseUrl(version, archive), notes: options.notes, target, merge });
   fs.writeFileSync(options.out, `${JSON.stringify(document, null, 2)}\n`);
-  console.log(`Wrote ${options.out} for ${document.platforms[TARGET].url}`);
+  console.log(`Wrote ${options.out}: ${Object.keys(document.platforms).join(', ')}`);
 }
 
 module.exports = { verify, manifest, releaseUrl };
