@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
@@ -787,6 +787,21 @@ fn toggle_login(app: &AppHandle) {
     });
 }
 
+/// Whether Control is held down now.
+#[cfg(target_os = "macos")]
+fn control_held() -> bool {
+    use objc2::{msg_send, runtime::AnyClass};
+    const CONTROL: usize = 1 << 18; // NSEventModifierFlagControl
+    AnyClass::get(c"NSEvent").is_some_and(|class| {
+        // SAFETY: `+[NSEvent modifierFlags]` is a class property returning NSEventModifierFlags (NSUInteger).
+        let flags: usize = unsafe { msg_send![class, modifierFlags] };
+        flags & CONTROL != 0
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn control_held() -> bool { false }
+
 fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
     let t = text(lang);
     let item = |id: &str, label: &str, enabled: bool| MenuItem::with_id(app, id, label, enabled, None::<&str>);
@@ -816,9 +831,16 @@ fn build_tray(app: &AppHandle, lang: &'static str) -> tauri::Result<TrayItems> {
         .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?)
         .icon_as_template(true)
         .menu(&menu)
-        .show_menu_on_left_click(true)
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Enter { .. } = event { refresh_login(tray.app_handle()) }
+        // A click opens the console and a right click shows the menu.
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Enter { .. } => refresh_login(tray.app_handle()),
+            // Control-click, the right click of a one-button mouse, arrives as a
+            // left click: it shows the menu too.
+            TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
+                if control_held() { let _ = tray.with_inner_tray_icon(|inner| inner.show_menu()); } else { show_main(tray.app_handle()) }
+            }
+            _ => {}
         })
         .on_menu_event(move |app, event| {
             let t = text(lang);
