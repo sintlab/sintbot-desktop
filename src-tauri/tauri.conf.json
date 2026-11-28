@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SintBot",
+  "version": "0.2.0",
+  "identifier": "com.sintbot.desktop",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "category": "DeveloperTool",
+    "copyright": "© WaterTian",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns"
+    ],
+    "resources": {
+      "resources/runtime/bin/node": "runtime/bin/node",
+      "resources/runtime/npm.tgz": "runtime/npm.tgz",
+      "resources/runtime/VERSION": "runtime/VERSION",
+      "resources/runtime/LICENSE": "runtime/LICENSE",
+      "resources/payload/sintbot.tgz": "payload/sintbot.tgz",
+      "resources/payload/VERSION": "payload/VERSION"
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZDN0EwRTBCMUE4ODVCQTYKUldTbVc0Z2FDdzU2L0dSaEZndVRNdHRpTUxGZTMwVlFtVURzT2NRbXEzOUltM0tRWHRpcEthL0cK",
+      "endpoints": [
+        "https://github.com/sintlab/sintbot-desktop/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
+    }
+  }
+}
