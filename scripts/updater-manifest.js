@@ -20,7 +20,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const REPOSITORY = 'https://github.com/sintlab/sintbot-desktop';
+const REPOSITORY = 'https://github.com/sint908/sintbot-desktop';
 const TARGETS = ['darwin-aarch64', 'darwin-x86_64'];
 const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
 

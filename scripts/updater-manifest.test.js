@@ -43,7 +43,7 @@ test('a signature from a key the app does not embed is refused', () => {
 
 test('latest.json has what the updater reads', () => {
   const url = releaseUrl('0.1.4', '/tmp/out/SintBot_0.1.4_aarch64.app.tar.gz');
-  assert.strictEqual(url, 'https://github.com/sintlab/sintbot-desktop/releases/download/v0.1.4/SintBot_0.1.4_aarch64.app.tar.gz');
+  assert.strictEqual(url, 'https://github.com/sint908/sintbot-desktop/releases/download/v0.1.4/SintBot_0.1.4_aarch64.app.tar.gz');
   const document = manifest({ version: '0.1.4', signature: `${SIGNATURE}\n`, url, date: new Date('2026-11-18T03:04:05.678Z') });
   assert.deepStrictEqual(document, {
     version: '0.1.4', notes: 'SintBot for macOS 0.1.4', pub_date: '2026-11-18T03:04:05Z',

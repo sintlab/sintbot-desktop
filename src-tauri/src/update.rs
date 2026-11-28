@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn the_archive_comes_over_https_unless_testing_locally() {
-        let https = Url::parse("https://github.com/sintlab/sintbot-desktop/releases/download/v0.1.4/SintBot_0.1.4_aarch64.app.tar.gz").unwrap();
+        let https = Url::parse("https://github.com/sint908/sintbot-desktop/releases/download/v0.1.4/SintBot_0.1.4_aarch64.app.tar.gz").unwrap();
         let loopback = Url::parse("http://127.0.0.1:8765/SintBot.app.tar.gz").unwrap();
         let plain = Url::parse("http://example.com/SintBot.app.tar.gz").unwrap();
         assert!(archive_allowed(&https, false) && archive_allowed(&https, true));
